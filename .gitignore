@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch / training checkpoints
+checkpoints/
+sber_mesh_qc/checkpoints/
+sber_mesh_qc/smoke_debug.log
+sber_mesh_qc/submission.csv
+
+# Large Datasets / Renderings / Data Cache
+data/
+sber_mesh_qc/data/
+train_tensors/
+test_tensors/
+sber_mesh_qc/train_tensors/
+sber_mesh_qc/test_tensors/
+sber_mesh_qc/solution/train_tensors/
+sber_mesh_qc/solution/test_tensors/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+ehthumbs.db
+Thumbs.db

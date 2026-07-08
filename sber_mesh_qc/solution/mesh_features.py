@@ -979,12 +979,12 @@ def batch_extract_mesh_features(
     all_features = []
     missing = []
 
-    num_workers = min(os.cpu_count() or 4, 2)   # Colab has only 2 cores
+    num_workers = min(os.cpu_count() or 4, 16)
     if len(item_ids) > 10 and num_workers > 1:
         from concurrent.futures import ProcessPoolExecutor
         import math
         tasks = [(item_id, data_dir, extended, feat_dim) for item_id in item_ids]
-        chunk_size = 50                              # much smaller to avoid memory bloat
+        chunk_size = max(1, math.ceil(len(tasks) / (num_workers * 4)))
         print(f"[batch_extract] Using {num_workers} CPU processes, chunk_size={chunk_size} for {len(item_ids)} meshes...")
         all_features = [None] * len(item_ids)
         with ProcessPoolExecutor(max_workers=num_workers) as executor:

@@ -384,3 +384,19 @@ def compute_uncertainty_scores(probabilities: np.ndarray, threshold: float = 0.5
     }
 
 
+def safe_collate(batch):
+    """
+    Custom collate function that handles None values (for missing modalities
+    like mesh_features or point_clouds) without raising TypeErrors.
+    """
+    from torch.utils.data._utils.collate import default_collate
+    elem = batch[0]
+    if isinstance(elem, dict):
+        return {key: safe_collate([d[key] for d in batch]) for key in elem}
+    elif elem is None:
+        return None
+    else:
+        return default_collate(batch)
+
+
+

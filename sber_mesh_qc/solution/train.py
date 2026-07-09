@@ -111,7 +111,7 @@ from config import (
     MOE_PROJECTION_DIM,            # Common projection dim
     SEQUENTIAL_VIEWS_IN_MOE,       # Sequential view processing in MoE
 )
-from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality
+from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality, safe_collate
 from utils import optimize_thresholds_f1_final, learn_temperature
 from config import get_class_weights
 from image_processing import MeshQualityDataset
@@ -452,6 +452,7 @@ def train_one_fold(
         worker_init_fn=_worker_init_fn,
         persistent_workers=(effective_workers > 0),
         prefetch_factor=2 if effective_workers > 0 else None,
+        collate_fn=safe_collate,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
@@ -459,6 +460,7 @@ def train_one_fold(
         worker_init_fn=_worker_init_fn,
         persistent_workers=(effective_workers > 0),
         prefetch_factor=2 if effective_workers > 0 else None,
+        collate_fn=safe_collate,
     )
 
     # ── Build model ────────────────────────────────────────────────────────
@@ -713,6 +715,7 @@ def train_one_fold(
                 worker_init_fn=_worker_init_fn,
                 persistent_workers=(effective_workers > 0),
                 prefetch_factor=2 if effective_workers > 0 else None,
+                collate_fn=safe_collate,
             )
             epoch_val_labels = val_labels.iloc[val_indices]
         else:
@@ -966,6 +969,10 @@ def train_full_cv(
     os.makedirs(log_dir, exist_ok=True)
 
     train_df = train_df.copy()
+    # Strip "OUTPUT:" prefix from columns if present
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
+    if "Unnamed: 0" in train_df.columns:
+        train_df = train_df.drop(columns=["Unnamed: 0"])
     if "quality" not in train_df.columns:
         defect_vals = train_df[DEFECT_COLS].values
         train_df["quality"] = derive_quality(defect_vals)

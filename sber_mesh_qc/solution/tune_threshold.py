@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
 
 import config as cfg
-from utils import set_seed, derive_quality, compute_f1_final
+from utils import set_seed, derive_quality, compute_f1_final, safe_collate
 from image_processing import MeshQualityDataset
 from models import build_model_from_config, ConfidenceScheduledRouter
 
@@ -30,7 +30,8 @@ def tune_early_exit_threshold(
     
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.BATCH_SIZE * 2, shuffle=False,
-        num_workers=getattr(cfg, "NUM_WORKERS", 4), pin_memory=cfg.PIN_MEMORY
+        num_workers=getattr(cfg, "NUM_WORKERS", 4), pin_memory=cfg.PIN_MEMORY,
+        collate_fn=safe_collate
     )
     
     # 1. Collect all predictions, geometry features, and true labels

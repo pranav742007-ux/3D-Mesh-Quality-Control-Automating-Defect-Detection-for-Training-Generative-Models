@@ -39,7 +39,7 @@ from config import (
     USE_MOE, MOE_EXPERT_CONFIGS, MOE_TOP_K, MOE_ROUTER_HIDDEN_DIM,
     MOE_ROUTER_NOISE_STD, MOE_PROJECTION_DIM, SEQUENTIAL_VIEWS_IN_MOE,
 )
-from utils import set_seed, derive_quality
+from utils import set_seed, derive_quality, safe_collate
 from image_processing import MeshQualityDataset, TTATransform
 from models import (
     MultiViewImageModel, MeshFeatureMLP, FusedEnsembleModel,
@@ -231,6 +231,7 @@ def ensemble_inference(
         num_workers=num_workers, pin_memory=PIN_MEMORY,
         persistent_workers=(num_workers > 0),
         prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=safe_collate,
     )
 
     # ── Ensemble across folds ──────────────────────────────────────────────
@@ -337,6 +338,10 @@ def generate_submission(
     v2.0: Accepts point_clouds for optional PointNet branch.
     """
     test_df = pd.read_csv(test_csv_path)
+    # Strip "OUTPUT:" prefix from columns if present
+    test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
+    if "Unnamed: 0" in test_df.columns:
+        test_df = test_df.drop(columns=["Unnamed: 0"])
     test_ids = test_df["item_id"].tolist()
 
     submission, proba_df = ensemble_inference(

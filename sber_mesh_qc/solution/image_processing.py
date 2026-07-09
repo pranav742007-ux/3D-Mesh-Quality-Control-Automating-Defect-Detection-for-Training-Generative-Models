@@ -10,7 +10,7 @@ Direct CPU orthographic fast rasterization, and multi-view data augmentation.
 import os
 import re
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
 import torchvision.transforms as T
 from torchvision.transforms import functional as TF
 import torch
@@ -19,6 +19,7 @@ from torch.utils.data import Dataset
 
 # Prevent decompression bomb DOS attacks by setting a strict but reasonable pixel limit
 Image.MAX_IMAGE_PIXELS = 50_000_000
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def _sanitize_item_id(item_id) -> str:

@@ -131,6 +131,7 @@ def step_extract_features(data_dir, base_dir, extended=True):
     test_csv = os.path.join(data_dir, "test.csv")
 
     train_df = pd.read_csv(train_csv)
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     train_ids = [str(x) for x in train_df["item_id"].tolist()]
     expected_train_dim = 68 if extended else 58
 
@@ -200,6 +201,7 @@ def step_extract_features(data_dir, base_dir, extended=True):
         from data_utils import _auto_generate_test_csv_if_missing
         _auto_generate_test_csv_if_missing(data_dir)
     test_df = pd.read_csv(test_csv)
+    test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     test_ids = [str(x) for x in test_df["item_id"].tolist()]
     expected_test_dim = expected_train_dim
 
@@ -262,7 +264,9 @@ def step_extract_point_clouds(data_dir, base_dir, num_points=1024):
     cache_test = os.path.join(base_dir, "point_clouds_test.npz")
 
     train_df = pd.read_csv(train_csv)
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     test_df = pd.read_csv(test_csv)
+    test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     train_ids = train_df["item_id"].tolist()
     test_ids = test_df["item_id"].tolist()
 
@@ -313,6 +317,7 @@ def step_train(train_features, data_dir, checkpoint_dir, log_dir, point_clouds=N
 
     train_csv = os.path.join(data_dir, "train.csv")
     train_df = pd.read_csv(train_csv)
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     if "quality" not in train_df.columns:
         from utils import derive_quality
         import config
@@ -590,6 +595,7 @@ def main():
         
         if os.path.isfile(train_csv):
             train_df = pd.read_csv(train_csv)
+            train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
             train_ids = train_df["item_id"].tolist()
             train_img_dir = os.path.join(data_dir, "train")
             train_out_dir = os.path.join(data_dir, "train_tensors")
@@ -598,6 +604,7 @@ def main():
             
         if os.path.isfile(test_csv):
             test_df = pd.read_csv(test_csv)
+            test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
             test_ids = test_df["item_id"].tolist()
             test_img_dir = os.path.join(data_dir, "test")
             test_out_dir = os.path.join(data_dir, "test_tensors")
@@ -678,6 +685,7 @@ def main():
         
         if os.path.isfile(train_csv):
             train_df = pd.read_csv(train_csv)
+            train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
             train_ids = train_df["item_id"].tolist()
             train_img_dir = os.path.join(data_dir, "train")
             train_out_dir = os.path.join(data_dir, "train_tensors")
@@ -686,6 +694,7 @@ def main():
             
         if os.path.isfile(test_csv):
             test_df = pd.read_csv(test_csv)
+            test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
             test_ids = test_df["item_id"].tolist()
             test_img_dir = os.path.join(data_dir, "test")
             test_out_dir = os.path.join(data_dir, "test_tensors")

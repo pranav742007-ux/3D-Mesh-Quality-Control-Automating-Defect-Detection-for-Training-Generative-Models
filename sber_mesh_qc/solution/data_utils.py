@@ -768,6 +768,7 @@ def validate_data_integrity(
     # ── Train ─────────────────────────────────────────────────────────────
     print("[validate_data_integrity] Checking train split …")
     train_df = pd.read_csv(train_csv_path)
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     report["train_total"] = len(train_df)
 
     for item_id in tqdm(train_df["item_id"].values, desc="  train", leave=False):
@@ -922,7 +923,9 @@ def extract_all_mesh_features(
 
     # ── Load CSVs ─────────────────────────────────────────────────────────
     train_df = pd.read_csv(train_csv_path)
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     test_df = pd.read_csv(test_csv_path)
+    test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     train_ids = [str(x) for x in train_df["item_id"].tolist()]
     test_ids = [str(x) for x in test_df["item_id"].tolist()]
 

@@ -180,21 +180,33 @@ class MultiViewImageModel(nn.Module):
 
         # Adapt first conv layer if in_channels != 3 (e.g. 6-channel pseudo-normals)
         if in_channels != 3:
-            first_layer = self.feature_extractor[0]
-            if isinstance(first_layer, nn.Conv2d):
-                old_weight = first_layer.weight
+            first_conv = None
+            for name, module in self.feature_extractor.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    first_conv = (name, module)
+                    break
+            if first_conv is not None:
+                name, conv_module = first_conv
+                old_weight = conv_module.weight
                 new_conv = nn.Conv2d(
                     in_channels,
-                    first_layer.out_channels,
-                    kernel_size=first_layer.kernel_size,
-                    stride=first_layer.stride,
-                    padding=first_layer.padding,
-                    bias=first_layer.bias is not None,
+                    conv_module.out_channels,
+                    kernel_size=conv_module.kernel_size,
+                    stride=conv_module.stride,
+                    padding=conv_module.padding,
+                    bias=conv_module.bias is not None,
                 )
                 with torch.no_grad():
                     new_conv.weight[:, :3] = old_weight
-                    new_conv.weight[:, 3:] = old_weight[:, :in_channels-3]
-                self.feature_extractor[0] = new_conv
+                    for c in range(3, in_channels):
+                        new_conv.weight[:, c] = old_weight[:, c % 3]
+                
+                # Replace the module recursively
+                parts = name.split('.')
+                parent = self.feature_extractor
+                for part in parts[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, parts[-1], new_conv)
 
         # ── View attention pooling ─────────────────────────────────────────
         self.view_attention = nn.Sequential(
@@ -624,6 +636,8 @@ class DeepSeekMLACrossModalAttention(nn.Module):
         self.v_up_proj = nn.Linear(kv_compression_dim, d_model)
         self.q_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
+        self.norm_img = nn.LayerNorm(d_model)
+        self.norm_geom = nn.LayerNorm(d_model)
 
     def forward(self, img_tokens: torch.Tensor, geom_tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         B, N_img, D = img_tokens.shape
@@ -638,7 +652,10 @@ class DeepSeekMLACrossModalAttention(nn.Module):
         # PyTorch SDPA (Scaled Dot-Product Attention) for 3x FlashAttention speedup
         attn_out = F.scaled_dot_product_attention(Q, K, V)           # (B, n_heads, N_img, head_dim)
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, N_img, D)
-        return self.out_proj(attn_out), c_kv
+        
+        img_out = self.norm_img(img_tokens + self.out_proj(attn_out))
+        geom_out = self.norm_geom(geom_tokens)
+        return img_out, geom_out
 
 
 class FlashCrossModalCoAttention(nn.Module):

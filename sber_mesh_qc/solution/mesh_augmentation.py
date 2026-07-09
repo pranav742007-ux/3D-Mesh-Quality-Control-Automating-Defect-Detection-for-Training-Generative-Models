@@ -53,6 +53,20 @@ def augment_mesh_geometry(
     return aug_vertices, aug_faces
 
 
+def _offline_aug_worker(task):
+    src, dst, idx, n_std, h_ratio = task
+    try:
+        data = np.load(src, allow_pickle=False)
+        v = data["vertices"]
+        f = data["faces"]
+        av, af = augment_mesh_geometry(v, f, noise_std=n_std, hole_ratio=h_ratio, seed=42 + idx)
+        np.savez(dst, vertices=av, faces=af)
+        return True
+    except Exception as e:
+        print(f"Failed to augment {src} -> {dst}: {e}")
+        return False
+
+
 def generate_offline_augmentations(
     train_ids: list,
     train_dir: str,
@@ -87,22 +101,9 @@ def generate_offline_augmentations(
 
     print(f"[Offline Augment] Generating {len(tasks)} augmented meshes in parallel...")
     num_workers = min(os.cpu_count() or 4, 16)
-    
-    def _worker(task):
-        src, dst, idx, n_std, h_ratio = task
-        try:
-            data = np.load(src, allow_pickle=False)
-            v = data["vertices"]
-            f = data["faces"]
-            av, af = augment_mesh_geometry(v, f, noise_std=n_std, hole_ratio=h_ratio, seed=42 + idx)
-            np.savez(dst, vertices=av, faces=af)
-            return True
-        except Exception as e:
-            print(f"Failed to augment {src} -> {dst}: {e}")
-            return False
             
     chunk_size = max(1, math.ceil(len(tasks) / (num_workers * 4)))
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        list(executor.map(_worker, tasks, chunksize=chunk_size))
+        list(executor.map(_offline_aug_worker, tasks, chunksize=chunk_size))
         
     print(f"[Offline Augment] Successfully generated augmented meshes in '{output_aug_dir}'.")

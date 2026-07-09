@@ -399,4 +399,38 @@ def safe_collate(batch):
         return default_collate(batch)
 
 
+def clean_state_dict_keys(state_dict: dict, model: nn.Module) -> dict:
+    """
+    Adjust state_dict keys to match the model wrapper structure.
+    Adds/removes 'base_model.' prefix if the model is wrapped in AgenticEnsembleModel but the checkpoint is not (or vice-versa).
+    """
+    if not isinstance(state_dict, dict) or not isinstance(model, nn.Module):
+        return state_dict
+
+    model_has_wrapper = hasattr(model, 'base_model')
+    ckpt_has_wrapper = any(k.startswith('base_model.') for k in state_dict.keys())
+
+    if model_has_wrapper and not ckpt_has_wrapper:
+        # Checkpoint is raw, model has agentic wrapper -> add 'base_model.' prefix
+        new_dict = {}
+        for k, v in state_dict.items():
+            # Only prefix standard model parameters, keep router and effort parameters intact
+            if not k.startswith('confidence_router.') and not k.startswith('effort_controller.'):
+                new_dict[f"base_model.{k}"] = v
+            else:
+                new_dict[k] = v
+        return new_dict
+    elif not model_has_wrapper and ckpt_has_wrapper:
+        # Checkpoint has agentic wrapper, model is raw -> remove 'base_model.' prefix
+        new_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('base_model.'):
+                new_dict[k.replace('base_model.', '', 1)] = v
+            else:
+                new_dict[k] = v
+        return new_dict
+
+    return state_dict
+
+
 

@@ -39,7 +39,7 @@ from config import (
     USE_MOE, MOE_EXPERT_CONFIGS, MOE_TOP_K, MOE_ROUTER_HIDDEN_DIM,
     MOE_ROUTER_NOISE_STD, MOE_PROJECTION_DIM, SEQUENTIAL_VIEWS_IN_MOE,
 )
-from utils import set_seed, derive_quality, safe_collate
+from utils import set_seed, derive_quality, safe_collate, clean_state_dict_keys
 from image_processing import MeshQualityDataset, TTATransform
 from models import (
     MultiViewImageModel, MeshFeatureMLP, FusedEnsembleModel,
@@ -268,6 +268,7 @@ def ensemble_inference(
         ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
         # Handle both formats: full checkpoint dict (with model_state_dict key) or plain state_dict
         state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        state_dict = clean_state_dict_keys(state_dict, model)
         try:
             model.load_state_dict(state_dict, strict=strict_loading)
         except RuntimeError as err:

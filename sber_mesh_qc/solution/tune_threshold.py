@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import f1_score
 
 import config as cfg
-from utils import set_seed, derive_quality, compute_f1_final, safe_collate
+from utils import set_seed, derive_quality, compute_f1_final, safe_collate, clean_state_dict_keys
 from image_processing import MeshQualityDataset
 from models import build_model_from_config, ConfidenceScheduledRouter
 
@@ -78,9 +78,16 @@ def tune_early_exit_threshold(
         print("  [WARNING] No separate mesh_model found in architecture, falling back to full_preds.")
         mesh_probs = full_preds
         
-    # 3. Instantiate router to get confidence scores
-    router = ConfidenceScheduledRouter(in_features=geom_feats.shape[1])
-    router.to(device)
+    # 3. Resolve the trained router from the model if available
+    router = getattr(model, "confidence_router", None)
+    if router is None and hasattr(model, "base_model"):
+        router = getattr(model.base_model, "confidence_router", None)
+        
+    if router is None:
+        print("  [WARNING] No trained router found in model, initializing a default router.")
+        router = ConfidenceScheduledRouter(in_features=geom_feats.shape[1])
+        router.to(device)
+        
     router.eval()
     with torch.no_grad():
         conf_scores, _ = router(torch.tensor(geom_feats, dtype=torch.float32).to(device))
@@ -137,7 +144,9 @@ if __name__ == "__main__":
         print(f"Loading checkpoint {best_model_path} for tuning...")
         model = build_model_from_config(cfg, effective_mesh_dim=100).to(cfg.DEVICE)
         ckpt = torch.load(best_model_path, map_location=cfg.DEVICE, weights_only=False)
-        model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
+        state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        state_dict = clean_state_dict_keys(state_dict, model)
+        model.load_state_dict(state_dict, strict=False)
         
         dummy_ids = [f"dummy_{i}" for i in range(50)]
         dummy_labels = pd.DataFrame(np.random.randint(0, 2, size=(50, 10)), columns=[

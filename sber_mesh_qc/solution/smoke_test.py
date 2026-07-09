@@ -341,10 +341,10 @@ def run_smoke_tests():
     mla_attn = DeepSeekMLACrossModalAttention(d_model=256, n_heads=4, kv_compression_dim=64).to(device)
     dummy_img = torch.randn(2, 6, 256, device=device)
     dummy_geom = torch.randn(2, 2, 256, device=device)
-    mla_out, c_kv = mla_attn(dummy_img, dummy_geom)
+    mla_out, geom_out = mla_attn(dummy_img, dummy_geom)
     assert mla_out.shape == (2, 6, 256)
-    assert c_kv.shape == (2, 2, 64)
-    print(f"  [OK] DeepSeek-V3 MLA Latent Attention verified! OutShape={mla_out.shape}, c_KV={c_kv.shape}")
+    assert geom_out.shape == (2, 2, 256)
+    print(f"  [OK] DeepSeek-V3 MLA Latent Attention verified! OutShape={mla_out.shape}, GeomShape={geom_out.shape}")
 
     # ── Test 22: FlashAttention-2 SDPA & Hard Defect Focal Loss Check ────────
     print("\n[Test 22/23] FlashAttention-2 SDPA & Quality-Aware Focal Loss Verification...")

@@ -56,6 +56,8 @@ def export_to_onnx(
         print(f"[ONNX Export] Loading trained model weights from {checkpoint_path}...")
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         state_dict = ckpt.get("model_state_dict", ckpt)
+        from utils import clean_state_dict_keys
+        state_dict = clean_state_dict_keys(state_dict, model)
         res = model.load_state_dict(state_dict, strict=False)
         print(f"  [OK] State dict loaded (Missing: {len(res.missing_keys)}, Unexpected: {len(res.unexpected_keys)})")
     else:
@@ -157,6 +159,8 @@ def verify_onnx_export(
     if checkpoint_path and os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("model_state_dict", ckpt)
+        from utils import clean_state_dict_keys
+        state_dict = clean_state_dict_keys(state_dict, model)
         model.load_state_dict(state_dict, strict=False)
     model.eval()
     with torch.no_grad():

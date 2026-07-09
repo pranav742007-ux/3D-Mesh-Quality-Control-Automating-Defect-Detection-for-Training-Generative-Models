@@ -39,7 +39,7 @@ except ImportError:
 import torch
 import config as cfg
 from models import build_model_from_config
-from utils import derive_quality, sigmoid, compute_uncertainty_scores
+from utils import derive_quality, sigmoid, compute_uncertainty_scores, clean_state_dict_keys
 
 DEFECT_COLS = [
     "abstract", "artifacts", "intersection", "lowpoly",
@@ -70,6 +70,7 @@ def load_pytorch_model():
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             state = ckpt.get("model_state_dict", ckpt)
+            state = clean_state_dict_keys(state, model)
             res = model.load_state_dict(state, strict=False)
             print(f"  [API Startup] Loaded PyTorch checkpoint from {ckpt_path}. Missing keys: {res.missing_keys}, Unexpected: {res.unexpected_keys}")
         else:

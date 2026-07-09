@@ -111,7 +111,7 @@ from config import (
     MOE_PROJECTION_DIM,            # Common projection dim
     SEQUENTIAL_VIEWS_IN_MOE,       # Sequential view processing in MoE
 )
-from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality, safe_collate
+from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality, safe_collate, clean_state_dict_keys
 from utils import optimize_thresholds_f1_final, learn_temperature
 from config import get_class_weights
 from image_processing import MeshQualityDataset
@@ -200,13 +200,10 @@ class ModelEMA:
         return {"shadow": self.shadow, "buffers": self.buffers, "decay": self.decay}
 
     def load_state_dict(self, state_dict: dict):
-        """Load shadow weights and buffers from a state dict."""
+        """Load shadow weights and buffers from a state dict safely."""
         self.decay = state_dict.get("decay", self.decay)
-        self.shadow = state_dict.get("shadow", {})
-        self.buffers = state_dict.get("buffers", {})
-        """Load shadow weights from a saved state dict."""
-        self.shadow = state_dict["shadow"]
-        self.decay = state_dict.get("decay", self.decay)
+        self.shadow = state_dict.get("shadow", self.shadow)
+        self.buffers = state_dict.get("buffers", self.buffers)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -369,6 +366,13 @@ def train_one_fold(
 
     # ── Prepare labels by filtering the FULL dataframe ────────────────────
     train_indexed = train_df.set_index("item_id")
+    # Cast index to string to prevent type mismatch (str vs int)
+    train_indexed.index = train_indexed.index.astype(str)
+    
+    # Ensure all input IDs are stringified
+    train_ids = [str(i) for i in train_ids]
+    val_ids = [str(i) for i in val_ids]
+
     valid_train_ids = [i for i in train_ids if i in train_indexed.index]
     valid_val_ids = [i for i in val_ids if i in train_indexed.index]
 
@@ -567,11 +571,7 @@ def train_one_fold(
         if current_img_size != train_dataset.image_size:
             print(f"  [Progressive Resize] Epoch {epoch+1}: {train_dataset.image_size}px -> {current_img_size}px")
             train_dataset.image_size = current_img_size
-            train_dataset.base_transform = T.Compose([
-                T.Resize((current_img_size, current_img_size)),
-                T.ToTensor(),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
+            train_dataset.resize_transform = T.Resize((current_img_size, current_img_size))
 
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
@@ -620,11 +620,13 @@ def train_one_fold(
                 # Gradient checkpointing on image backbone (Limitation #5)
                 # Only applies to single-backbone model (MoE handles its own memory)
                 if USE_GRADIENT_CHECKPOINTING and model.training and not is_moe:
+                    from models import AgenticEnsembleModel
+                    raw_model = model.base_model if isinstance(model, AgenticEnsembleModel) else model
                     from torch.utils.checkpoint import checkpoint
-                    original_forward = model.image_model._extract_view_features
+                    original_forward = raw_model.image_model._extract_view_features
                     def checkpointed_forward(view_batch):
                         return checkpoint(original_forward, view_batch, use_reentrant=False)
-                    model.image_model._extract_view_features = checkpointed_forward
+                    raw_model.image_model._extract_view_features = checkpointed_forward
 
                 # v3.0: MoE returns (logits, aux_info), single model returns logits
                 if is_moe:
@@ -634,7 +636,7 @@ def train_one_fold(
 
                 # Restore original forward after checkpoint
                 if USE_GRADIENT_CHECKPOINTING and model.training and not is_moe:
-                    model.image_model._extract_view_features = original_forward
+                    raw_model.image_model._extract_view_features = original_forward
 
                 loss = criterion(logits, labels)
 
@@ -713,7 +715,7 @@ def train_one_fold(
                 epoch_val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
                 num_workers=effective_workers, pin_memory=PIN_MEMORY,
                 worker_init_fn=_worker_init_fn,
-                persistent_workers=(effective_workers > 0),
+                persistent_workers=False,
                 prefetch_factor=2 if effective_workers > 0 else None,
                 collate_fn=safe_collate,
             )
@@ -795,6 +797,7 @@ def train_one_fold(
     best_ckpt = torch.load(best_path, map_location=DEVICE, weights_only=False)
     # Handle both formats: full checkpoint dict (with model_state_dict key) or plain state_dict
     best_state = best_ckpt.get("model_state_dict", best_ckpt) if isinstance(best_ckpt, dict) else best_ckpt
+    best_state = clean_state_dict_keys(best_state, model)
     model.load_state_dict(best_state)
 
     val_proba = predict_proba(model, val_loader, DEVICE, is_moe=is_moe)

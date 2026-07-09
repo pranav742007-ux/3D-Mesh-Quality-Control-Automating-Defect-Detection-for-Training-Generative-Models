@@ -64,18 +64,23 @@ class MultiViewGradCAM:
     def __init__(self, model, target_layer_name: str = None):
         """
         Args:
-            model: FusedEnsembleModel
+            model: FusedEnsembleModel or AgenticEnsembleModel wrapper
             target_layer_name: name of the last conv layer (auto-detected if None)
         """
         self.model = model
         self.model.eval()
-        self.sequential_views = getattr(model.image_model, "sequential_views", False)
+        
+        # Resolve base model if wrapped in AgenticEnsembleModel wrapper
+        from models import AgenticEnsembleModel
+        self.raw_model = model.base_model if isinstance(model, AgenticEnsembleModel) else model
+        
+        self.sequential_views = getattr(self.raw_model.image_model, "sequential_views", False)
         
         # Auto-detect the last convolutional layer in the backbone
         if target_layer_name is None:
-            self.target_layer = self._find_last_conv(model.image_model.feature_extractor)
+            self.target_layer = self._find_last_conv(self.raw_model.image_model.feature_extractor)
         else:
-            self.target_layer = dict(model.image_model.named_modules())[target_layer_name]
+            self.target_layer = dict(self.raw_model.image_model.named_modules())[target_layer_name]
         
         self.handles = []
     
@@ -108,13 +113,13 @@ class MultiViewGradCAM:
         
         try:
             # Forward through the feature extractor only
-            feat = self.model.image_model._extract_view_features(view_tensor)
+            feat = self.raw_model.image_model._extract_view_features(view_tensor)
             
             # We need to propagate gradients from the final logits back to the features.
             # To do this properly, we run the full image_model forward on a single view
             # by reshaping to (B, 1, 3, H, W).
             single_view = view_tensor.unsqueeze(1)  # (B, 1, 3, H, W)
-            logits = self.model.image_model(single_view)  # (B, 10)
+            logits = self.raw_model.image_model(single_view)  # (B, 10)
             
             self.model.zero_grad()
             logits[0, target_class].backward(retain_graph=False)
@@ -155,7 +160,7 @@ class MultiViewGradCAM:
         
         # First, get predictions to determine target class
         with torch.no_grad():
-            logits = self.model.image_model(views)
+            logits = self.raw_model.image_model(views)
             probs = torch.sigmoid(logits)
         
         if target_class is None:
@@ -193,7 +198,7 @@ class MultiViewGradCAM:
             
             try:
                 self.model.zero_grad()
-                logits = self.model.image_model(views)
+                logits = self.raw_model.image_model(views)
                 logits[0, target_class].backward(retain_graph=False)
                 
                 if gradients[0] is None or activations[0] is None:
@@ -237,8 +242,10 @@ def get_view_attention(model, views: torch.Tensor) -> np.ndarray:
         (6,) array of attention weights (sum to 1)
     """
     model.eval()
+    from models import AgenticEnsembleModel
+    raw_model = model.base_model if isinstance(model, AgenticEnsembleModel) else model
     with torch.no_grad():
-        attn = model.image_model.get_attention_weights(views)
+        attn = raw_model.image_model.get_attention_weights(views)
     return attn.cpu().numpy().flatten()
 
 
@@ -262,10 +269,18 @@ def analyze_mesh_feature_importance(model, mesh_features: np.ndarray) -> dict:
     model.eval()
     device = next(model.parameters()).device
     
+    # Resolve mesh_model from wrapper if wrapped
+    mesh_model = getattr(model, "mesh_model", None)
+    if mesh_model is None and hasattr(model, "base_model"):
+        mesh_model = getattr(model.base_model, "mesh_model", None)
+        
+    if mesh_model is None:
+        raise AttributeError("No mesh_model found in architecture.")
+        
     feat_tensor = torch.tensor(mesh_features, dtype=torch.float32).to(device)
     
     with torch.no_grad():
-        base_logits = model.mesh_model(feat_tensor)
+        base_logits = mesh_model(feat_tensor)
         base_probs = torch.sigmoid(base_logits)
     
     # Compute per-feature std for perturbation
@@ -290,7 +305,7 @@ def analyze_mesh_feature_importance(model, mesh_features: np.ndarray) -> dict:
         feat_up[:, i] += 2 * float(feat_std[0, i])
         
         with torch.no_grad():
-            probs_up = torch.sigmoid(model.mesh_model(feat_up))
+            probs_up = torch.sigmoid(mesh_model(feat_up))
         
         # Average absolute change across all samples and classes
         delta = (probs_up - base_probs).abs().mean().item()
@@ -326,6 +341,10 @@ def create_defect_visualization(
     
     Produces a publication-quality figure.
     """
+    if not HAS_MATPLOTLIB:
+        print("  [WARNING] matplotlib is not installed — skipping combined visualization figure creation")
+        return None
+
     from image_processing import split_six_views
     from torchvision.transforms.functional import resize, to_tensor, normalize
     
@@ -344,8 +363,10 @@ def create_defect_visualization(
     
     # ── Get predictions ────────────────────────────────────────────────────
     model.eval()
+    from models import AgenticEnsembleModel
+    raw_model = model.base_model if isinstance(model, AgenticEnsembleModel) else model
     with torch.no_grad():
-        logits = model.image_model(views_tensor)
+        logits = raw_model.image_model(views_tensor)
         probs = torch.sigmoid(logits)
     if predictions is None:
         predictions = probs.cpu().numpy().flatten()

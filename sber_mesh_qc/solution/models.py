@@ -809,6 +809,9 @@ class FusedEnsembleModel(nn.Module):
         mesh_features: Optional[torch.Tensor] = None,
         point_cloud: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # Cast mesh_features to match views dtype (float16 under AMP, float32 otherwise)
+        if mesh_features is not None:
+            mesh_features = mesh_features.to(dtype=views.dtype)
         image_logits = self.image_model(views)
         image_probs = torch.sigmoid(image_logits)
 
@@ -1220,6 +1223,9 @@ class OctopusMoEModel(nn.Module):
         fused_image_logits = torch.log(fused_image_probs / (1.0 - fused_image_probs))
 
         # ── Step 4: Final fusion with mesh (and optional pointnet) ──────
+        # Cast mesh_features to match views dtype (float16 under AMP, float32 otherwise)
+        if mesh_features is not None:
+            mesh_features = mesh_features.to(dtype=views.dtype)
         if mesh_features is None and self.pointnet_model is None:
             return fused_image_logits, aux_info
 
@@ -1664,6 +1670,10 @@ class AgenticEnsembleModel(nn.Module):
         return self._forward_impl(views, mesh_features, point_cloud, effort, use_simple=True)
 
     def _forward_impl(self, views, mesh_features=None, point_cloud=None, effort="max", use_simple=False):
+        # Cast mesh_features to match views dtype at entry — prevents float32/float16
+        # mismatch under AMP across ALL branches (training, early-exit, effort-control, etc.)
+        if mesh_features is not None:
+            mesh_features = mesh_features.to(dtype=views.dtype)
         # Always bypass wrapper logic during training to ensure valid gradient flows
         if self.training:
             if use_simple and hasattr(self.base_model, "forward_simple"):
@@ -1689,6 +1699,9 @@ class AgenticEnsembleModel(nn.Module):
             elif early_exit_mask.any():
                 B = views.size(0)
                 logits = torch.zeros((B, 10), device=views.device, dtype=views.dtype)
+                # dtype already cast at _forward_impl entry — no-op guard kept for safety
+                if mesh_features is not None:
+                    mesh_features = mesh_features.to(dtype=views.dtype)
                 
                 confident_idx = torch.where(early_exit_mask)[0]
                 uncertain_idx = torch.where(~early_exit_mask)[0]
@@ -1696,16 +1709,30 @@ class AgenticEnsembleModel(nn.Module):
                 mesh_model = getattr(self.base_model, "mesh_model", None)
                 if len(confident_idx) > 0:
                     if mesh_model is not None:
-                        logits[confident_idx] = mesh_model(mesh_features[confident_idx])
+                        try:
+                            out = mesh_model(mesh_features[confident_idx])
+                            logits[confident_idx] = out.to(dtype=logits.dtype)
+                        except Exception as e:
+                            # Diagnostic detail for dtype mismatch
+                            msg = (
+                                f"Dtype Error Info: views.dtype={views.dtype}, "
+                                f"mesh_features.dtype={mesh_features.dtype}, "
+                                f"logits.dtype={logits.dtype}, "
+                                f"autocast={torch.is_autocast_enabled()}. "
+                                f"Original Error: {str(e)}"
+                            )
+                            raise RuntimeError(msg) from e
                     else:
                         sub_views = views[confident_idx]
                         sub_mesh = mesh_features[confident_idx]
                         sub_pc = point_cloud[confident_idx] if point_cloud is not None else None
                         if use_simple and hasattr(self.base_model, "forward_simple"):
-                            logits[confident_idx] = self.base_model.forward_simple(sub_views, sub_mesh, sub_pc)
+                            out = self.base_model.forward_simple(sub_views, sub_mesh, sub_pc)
+                            logits[confident_idx] = out.to(dtype=logits.dtype)
                         else:
                             res = self.base_model(sub_views, sub_mesh, sub_pc)
-                            logits[confident_idx] = res[0] if isinstance(res, tuple) else res
+                            out = res[0] if isinstance(res, tuple) else res
+                            logits[confident_idx] = out.to(dtype=logits.dtype)
                 
                 if len(uncertain_idx) > 0:
                     sub_views = views[uncertain_idx]
@@ -1717,7 +1744,7 @@ class AgenticEnsembleModel(nn.Module):
                     else:
                         res = self.base_model(sub_views, sub_mesh, sub_pc)
                         sub_logits = res[0] if isinstance(res, tuple) else res
-                    logits[uncertain_idx] = sub_logits
+                    logits[uncertain_idx] = sub_logits.to(dtype=logits.dtype)
                 return logits
 
         # 2. Effort control check

@@ -54,7 +54,7 @@ def export_to_onnx(
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"[ONNX Export] Loading trained model weights from {checkpoint_path}...")
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         state_dict = ckpt.get("model_state_dict", ckpt)
         res = model.load_state_dict(state_dict, strict=False)
         print(f"  [OK] State dict loaded (Missing: {len(res.missing_keys)}, Unexpected: {len(res.unexpected_keys)})")
@@ -155,7 +155,7 @@ def verify_onnx_export(
     from models import MultiModalMeshQCModelV7
     model = MultiModalMeshQCModelV7(in_channels=in_channels, d_model=256, mesh_dim=mesh_dim, num_classes=10).to("cpu")
     if checkpoint_path and os.path.exists(checkpoint_path):
-        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("model_state_dict", ckpt)
         model.load_state_dict(state_dict, strict=False)
     model.eval()

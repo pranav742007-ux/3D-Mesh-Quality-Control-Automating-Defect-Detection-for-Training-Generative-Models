@@ -110,7 +110,7 @@ USE_DYNAMIC_CLASS_WEIGHTS = True
 CLASS_WEIGHTS = None  # Will be computed as {class: weight}
 
 # --- Loss Function ---
-LOSS_FUNCTION = "bce_focal"  # Options: bce, bce_focal, asl
+LOSS_FUNCTION = "quality_focal"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
 FOCAL_GAMMA = 2.0            # Focal loss gamma
 FOCAL_ALPHA = None            # Auto-computed from class weights if None
 LABEL_SMOOTHING = 0.05
@@ -344,8 +344,8 @@ OFFLINE_AUGMENT = False                  # Enable generating augmented meshes of
 PREPROCESS_IMAGES_OFFLINE = True         # Pre-crop and pre-resize rendered view grids offline
 USE_KORNIA = False                       # Enable GPU-accelerated transforms via kornia
 USE_TORCH_COMPILE = False                # Enable torch.compile for model optimization
-VAL_SUBSAMPLE_RATIO = 0.2                # Fraction of validation set to evaluate per epoch
-NUM_WORKERS = 4                          # DataLoader workers count
+VAL_SUBSAMPLE_RATIO = 0.5                # Fraction of validation set to evaluate per epoch (0.2 is too noisy for checkpoint selection)
+# NOTE: NUM_WORKERS is defined once above (line ~293). Do NOT redefine here.
 
 # ──────────────────────────── DERIVED ────────────────────────────────────────
 def get_class_weights(train_df):

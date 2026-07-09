@@ -136,7 +136,7 @@ if __name__ == "__main__":
     if os.path.exists(best_model_path):
         print(f"Loading checkpoint {best_model_path} for tuning...")
         model = build_model_from_config(cfg, effective_mesh_dim=100).to(cfg.DEVICE)
-        ckpt = torch.load(best_model_path, map_location=cfg.DEVICE, weights_only=True)
+        ckpt = torch.load(best_model_path, map_location=cfg.DEVICE, weights_only=False)
         model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
         
         dummy_ids = [f"dummy_{i}" for i in range(50)]

@@ -68,7 +68,7 @@ def load_pytorch_model():
         model = build_model_from_config(cfg, effective_mesh_dim=mesh_dim)
         ckpt_path = os.path.join(sol_dir, "checkpoints", "best_model.pt")
         if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             state = ckpt.get("model_state_dict", ckpt)
             res = model.load_state_dict(state, strict=False)
             print(f"  [API Startup] Loaded PyTorch checkpoint from {ckpt_path}. Missing keys: {res.missing_keys}, Unexpected: {res.unexpected_keys}")

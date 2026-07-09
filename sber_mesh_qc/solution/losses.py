@@ -171,6 +171,9 @@ def build_loss_function(
     elif loss_name == "hybrid_asl":
         return HybridFocalASLLoss(gamma_neg=4.0, gamma_pos=1.0, clip=0.05, label_smoothing=label_smoothing)
     
+    elif loss_name == "quality_focal":
+        return QualityAwareHardDefectFocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing)
+    
     else:
         raise ValueError(f"Unknown loss: {loss_name}")
 

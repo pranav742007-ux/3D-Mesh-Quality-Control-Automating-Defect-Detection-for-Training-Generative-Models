@@ -792,7 +792,10 @@ def train_one_fold(
     # ── Threshold optimization on validation set ───────────────────────────
     print(f"\n  Optimizing thresholds on fold {fold+1} validation set...")
 
-    model.load_state_dict(torch.load(best_path, map_location=DEVICE, weights_only=True))
+    best_ckpt = torch.load(best_path, map_location=DEVICE, weights_only=False)
+    # Handle both formats: full checkpoint dict (with model_state_dict key) or plain state_dict
+    best_state = best_ckpt.get("model_state_dict", best_ckpt) if isinstance(best_ckpt, dict) else best_ckpt
+    model.load_state_dict(best_state)
 
     val_proba = predict_proba(model, val_loader, DEVICE, is_moe=is_moe)
     val_true = val_labels[DEFECT_COLS].values

@@ -265,7 +265,9 @@ def ensemble_inference(
         input_mesh_dim = mesh_features.shape[1] if mesh_features is not None and hasattr(mesh_features, "shape") and len(mesh_features.shape) > 1 else None
         model = build_model_for_inference(fold, input_mesh_dim=input_mesh_dim).to(DEVICE)
 
-        state_dict = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
+        ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+        # Handle both formats: full checkpoint dict (with model_state_dict key) or plain state_dict
+        state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
         try:
             model.load_state_dict(state_dict, strict=strict_loading)
         except RuntimeError as err:

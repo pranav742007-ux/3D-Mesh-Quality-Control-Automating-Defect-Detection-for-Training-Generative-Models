@@ -376,7 +376,7 @@ class MeshQualityDataset(Dataset):
             pt_path = os.path.join(tensor_dir, f"{safe_item_id}_views.pt")
             if os.path.isfile(pt_path):
                 try:
-                    stacked_tensor = torch.load(pt_path, map_location="cpu", weights_only=True)
+                    stacked_tensor = torch.load(pt_path, map_location="cpu", weights_only=False)
                     views = [stacked_tensor[i] for i in range(stacked_tensor.shape[0])]
                     loaded = True
                 except Exception:

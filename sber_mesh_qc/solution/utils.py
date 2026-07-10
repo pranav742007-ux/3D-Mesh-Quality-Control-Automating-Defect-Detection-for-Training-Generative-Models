@@ -13,6 +13,7 @@ import random
 from typing import Tuple, Optional, Dict
 import numpy as np
 import torch
+import torch.nn as nn
 import pandas as pd
 from sklearn.metrics import f1_score
 

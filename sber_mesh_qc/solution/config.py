@@ -322,7 +322,10 @@ USE_EXPERT_HEADS = False            # Enable Defect Domain Experts
 USE_MULTI_SAMPLE_DROPOUT = True    # Enable Multi-Sample Dropout (MSDO)
 USE_OHEM = True                     # Enable Online Hard Example Mining (OHEM)
 USE_CLEAN_SHIELD = True             # Enable Clean Mesh Shield Loss
-USE_SWA = True                      # Enable Stochastic Weight Averaging (SWA)
+# EMA is already enabled above.  Do not combine it with SWA by default: the
+# two averaging schemes need a validation comparison before either replaces a
+# selected checkpoint.
+USE_SWA = False                     # Enable only after a fold-level ablation
 SWA_START_EPOCH = 15                # Start averaging weights from epoch 15
 SWA_LR = 5e-5                       # SWA phase learning rate
 USE_GRADIENT_NORMALS = False        # Enable 6-channel Sobel pseudo-normals
@@ -339,7 +342,7 @@ USE_XAI_ROUTER = False              # Enable xAI Grok-3 MoE Dynamic Gated Router
 USE_FLEXIBLE_EFFORT = False         # Enable FlexibleThinkingEffortController
 USE_KIMI_DPO_LOSS = False           # Enable Kimi Quality Preference DPO Loss
 USE_OMNI_ROUTE = False              # Enable OmniRoute Dynamic Path Dispatcher
-USE_EARLY_EXIT = True               # Enable ConfidenceScheduledRouter early-exit (Phase A/B/C agentic flow)
+USE_EARLY_EXIT = False              # Requires a separately calibrated router; disabled for score runs
 EARLY_EXIT_THRESHOLD = 0.95         # Early exit confidence threshold
 
 # Heterogeneous CV Backbones (One per fold)
@@ -359,6 +362,9 @@ PREPROCESS_IMAGES_OFFLINE = True         # Pre-crop and pre-resize rendered view
 USE_KORNIA = False                       # Enable GPU-accelerated transforms via kornia
 USE_TORCH_COMPILE = False                # Enable torch.compile for model optimization
 VAL_SUBSAMPLE_RATIO = 0.5                # Fraction of validation set to evaluate per epoch (0.2 is too noisy for checkpoint selection)
+# An unvalidated post-processing heuristic must never silently alter calibrated
+# probabilities. Turn it on only after demonstrating an OOF improvement.
+USE_GEOMETRIC_SAFETY_NET = False
 # NOTE: NUM_WORKERS is defined once above (line ~293). Do NOT redefine here.
 
 # ──────────────────────────── DERIVED ────────────────────────────────────────

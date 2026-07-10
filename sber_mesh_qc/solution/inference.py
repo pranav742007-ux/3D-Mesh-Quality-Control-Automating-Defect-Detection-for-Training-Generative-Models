@@ -38,6 +38,7 @@ from config import (
     # v3.0 Octopus MoE flags
     USE_MOE, MOE_EXPERT_CONFIGS, MOE_TOP_K, MOE_ROUTER_HIDDEN_DIM,
     MOE_ROUTER_NOISE_STD, MOE_PROJECTION_DIM, SEQUENTIAL_VIEWS_IN_MOE,
+    USE_GRADIENT_NORMALS,
 )
 from utils import set_seed, derive_quality, safe_collate, clean_state_dict_keys
 from image_processing import MeshQualityDataset, TTATransform
@@ -217,27 +218,8 @@ def ensemble_inference(
 
     # ── Build test dataset & loader ────────────────────────────────────────
     # NOTE: No view subsampling at inference — always all 6 views
-    test_dataset = MeshQualityDataset(
-        item_ids=test_ids,
-        labels_df=None,
-        image_dir=test_image_dir,
-        mesh_features=mesh_features,
-        point_clouds=point_clouds,
-        image_size=IMAGE_SIZE,
-        view_grid=view_grid,
-        augment=False,
-        views_subsample=None,  # Always all views at inference
-    )
-
     import config as cfg
     num_workers = getattr(cfg, "NUM_WORKERS", NUM_WORKERS)
-    test_loader = DataLoader(
-        test_dataset, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=num_workers, pin_memory=PIN_MEMORY,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=2 if num_workers > 0 else None,
-        collate_fn=safe_collate,
-    )
 
     # ── Ensemble across folds ──────────────────────────────────────────────
     if folds_to_use is None:
@@ -282,12 +264,13 @@ def ensemble_inference(
         fold_test_dataset = MeshQualityDataset(
             item_ids=test_ids,
             labels_df=None,
-            image_dir=image_dir,
+            image_dir=test_image_dir,
             mesh_features=fold_mesh_features,
             point_clouds=point_clouds,
             image_size=IMAGE_SIZE,
             view_grid=view_grid,
             augment=False,
+            aug_config={"use_gradient_normals": USE_GRADIENT_NORMALS},
             views_subsample=None,
         )
         fold_test_loader = DataLoader(
@@ -337,7 +320,7 @@ def ensemble_inference(
     # Use unsupervised geometry to prevent False Positives on clean meshes.
     # If the model isn't confident about any defect (max prob < 0.35), it is likely clean.
     # We apply a compression factor to pull these uncertain probabilities down below threshold.
-    if mesh_features is not None:
+    if mesh_features is not None and getattr(config, "USE_GEOMETRIC_SAFETY_NET", False):
         max_probs = ensemble_proba.max(axis=1)
         uncertain_mask = max_probs < 0.35
         if uncertain_mask.any():

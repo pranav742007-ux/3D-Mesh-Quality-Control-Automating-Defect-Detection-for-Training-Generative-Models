@@ -325,6 +325,7 @@ def train_one_fold(
     fold: int,
     train_ids: list,
     val_ids: list,
+    val_indices: np.ndarray,
     train_df: pd.DataFrame,
     image_dir: str,
     mesh_feat_train: np.ndarray = None,
@@ -410,12 +411,17 @@ def train_one_fold(
     view_grid = None if AUTO_DETECT_GRID else VIEW_GRID
 
     # ── Augmentation config ────────────────────────────────────────────────
+    import config as cfg
     aug_config = {
         "horizontal_flip": AUG_HORIZONTAL_FLIP,
         "rotation": AUG_ROTATION,
         "color_jitter": AUG_COLOR_JITTER,
         "random_erasing": AUG_RANDOM_ERASING,
+        "use_gradient_normals": getattr(cfg, "USE_GRADIENT_NORMALS", False),
     } if USE_AUGMENTATION else {}
+    # Pseudo-normal channels are a model-input contract, not an augmentation.
+    # Preserve this flag even when regular image augmentation is disabled.
+    aug_config.setdefault("use_gradient_normals", getattr(cfg, "USE_GRADIENT_NORMALS", False))
 
     # ── Build datasets (initial image size for progressive resize) ────────
     initial_img_size = _get_image_size(0)
@@ -552,6 +558,7 @@ def train_one_fold(
     # Initialize SWA (Grandmaster Phase 3)
     swa_model = None
     swa_scheduler = None
+    swa_updates = 0
     if getattr(_cfg, "USE_SWA", False):
         from torch.optim.swa_utils import AveragedModel, SWALR
         swa_model = AveragedModel(model)
@@ -746,6 +753,7 @@ def train_one_fold(
 
         if getattr(_cfg, "USE_SWA", False) and swa_model is not None and epoch >= getattr(_cfg, "SWA_START_EPOCH", 15):
             swa_model.update_parameters(model)
+            swa_updates += 1
 
         # ── Validate (with EMA if enabled) ────────────────────────────────
         if ema is not None:
@@ -845,7 +853,7 @@ def train_one_fold(
             break
 
     # Apply SWA weights for final evaluation and checkpoint saving (Grandmaster Phase 3)
-    if getattr(_cfg, "USE_SWA", False) and swa_model is not None:
+    if getattr(_cfg, "USE_SWA", False) and swa_model is not None and swa_updates > 0:
         try:
             print("  Applying SWA weights for final evaluation and checkpoint saving...")
             swa_state = swa_model.state_dict()
@@ -863,6 +871,8 @@ def train_one_fold(
                 print("  [SWA] Re-saved best checkpoint with SWA weights.")
         except Exception as e:
             print(f"  [WARNING] SWA weight swap failed: {e}")
+    elif getattr(_cfg, "USE_SWA", False):
+        print("  [SWA] No SWA updates were collected; preserving the validated best checkpoint.")
 
     # ── Threshold optimization on validation set ───────────────────────────
     print(f"\n  Optimizing thresholds on fold {fold+1} validation set...")
@@ -938,7 +948,7 @@ def train_one_fold(
         "final_metrics": {k: float(v) for k, v in final_metrics.items()},
         "history": {k: [float(v) for v in vs] for k, vs in history.items()},
         "best_model_path": best_path,
-        "val_idx": val_idx if isinstance(val_idx, list) else val_idx.tolist(),
+        "val_idx": val_indices.tolist(),
         "val_proba": val_proba.tolist(),
     }
 
@@ -1091,6 +1101,7 @@ def train_full_cv(
             fold=fold,
             train_ids=fold_train_ids,
             val_ids=fold_val_ids,
+            val_indices=val_idx,
             train_df=train_df,
             image_dir=image_dir,
             mesh_feat_train=fold_mesh_train,

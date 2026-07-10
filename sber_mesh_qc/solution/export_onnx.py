@@ -26,10 +26,10 @@ from typing import Optional
 def export_to_onnx(
     output_onnx_path: str = "checkpoints/model_v7.onnx",
     checkpoint_path: Optional[str] = "checkpoints/best_model.pt",
-    in_channels: int = 3,
-    use_transformer: bool = True,
-    use_query_decoder: bool = True,
-    use_spatial_tokens: bool = False,
+    in_channels: Optional[int] = None,
+    use_transformer: Optional[bool] = None,
+    use_query_decoder: Optional[bool] = None,
+    use_spatial_tokens: Optional[bool] = None,
     device: str = "cpu",
 ) -> str:
     """
@@ -40,14 +40,26 @@ def export_to_onnx(
     import config as cfg
     mesh_dim = getattr(cfg, "MESH_FEATURE_DIM_EXTENDED", 100)
     
+    # Use dynamic config values if parameters are not explicitly passed
+    if in_channels is None:
+        in_channels = 6 if getattr(cfg, "USE_GRADIENT_NORMALS", False) else 3
+    if use_transformer is None:
+        use_transformer = getattr(cfg, "USE_CROSS_VIEW_TRANSFORMER", False)
+    if use_query_decoder is None:
+        use_query_decoder = getattr(cfg, "USE_DEFECT_QUERY_DECODER", False)
+    if use_spatial_tokens is None:
+        use_spatial_tokens = getattr(cfg, "USE_SPATIAL_VIEW_TOKENS", False)
+        
+    backbone_name = getattr(cfg, "IMAGE_BACKBONE", "efficientnetv2_s")
+    
     model = MultiModalMeshQCModelV7(
-        backbone_name="efficientnetv2_s",
+        backbone_name=backbone_name,
         pretrained=False,
         in_channels=in_channels,
         use_spatial_tokens=use_spatial_tokens,
         use_transformer=use_transformer,
         use_query_decoder=use_query_decoder,
-        d_model=256,
+        d_model=getattr(cfg, "TRANSFORMER_EMBED_DIM", 256),
         mesh_dim=mesh_dim,
         num_classes=10,
     ).to(device)

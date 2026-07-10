@@ -78,8 +78,8 @@ POINTNET_WEIGHT = 0.15         # Fusion weight for PointNet branch
 
 # ──────────────────────────── MODEL ARCHITECTURE ─────────────────────────────
 # --- Image Branch ---
-IMAGE_BACKBONE = "efficientnetv2_s"  # Options: efficientnetv2_s, efficientnet_b3, convnext_tiny
-IMAGE_EMBED_DIM = 1280    # EfficientNetV2-S output channels
+IMAGE_BACKBONE = "convnext_tiny"  # Options: efficientnetv2_s, efficientnet_b3, convnext_tiny
+IMAGE_EMBED_DIM = 768    # ConvNeXt-Tiny output channels
 IMAGE_HIDDEN_DIM = 512
 IMAGE_DROPOUT = 0.3
 IMAGE_PRETRAINED = True
@@ -95,7 +95,7 @@ FUSION_MESH_WEIGHT = 0.25      # Weight for mesh branch
 
 # ──────────────────────────── TRAINING SETTINGS ──────────────────────────────
 BATCH_SIZE = 8
-NUM_EPOCHS = 20
+NUM_EPOCHS = 30
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 GRADIENT_CLIP = 1.0
@@ -130,7 +130,7 @@ AUG_COLOR_JITTER = 0.2
 AUG_RANDOM_ERASING = 0.1
 
 # ──────────────────────────── CROSS-VALIDATION ───────────────────────────────
-NUM_FOLDS = 3
+NUM_FOLDS = 5
 STRATIFY_BY = "quality"       # Stratify folds by quality label
 VAL_SPLIT = 0.15              # Validation split within each fold
 
@@ -142,7 +142,7 @@ AUTO_DETECT_GRID = True     # Auto-detect PNG grid layout (vs fixed 3x2)
 # Keys are epoch thresholds: "at epoch X, switch to this size".
 # Schedule goes SMALL → LARGE (the standard progressive resize pattern).
 PROGRESSIVE_RESIZE = True
-PROGRESSIVE_SCHEDULE = {0: 128, 3: 192, 8: 224}  # epoch -> image_size
+PROGRESSIVE_SCHEDULE = {0: 128, 5: 192, 12: 224}  # epoch -> image_size
 
 # ──────────────────────────── MEMORY OPTIMIZATIONS (Limitation #5) ────────
 # Gradient checkpointing: trade compute for memory

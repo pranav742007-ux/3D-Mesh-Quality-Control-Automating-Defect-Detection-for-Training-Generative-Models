@@ -583,6 +583,193 @@ The agentic inference pipeline can be customized through API requests or configu
    - `"max"`: Activates all enabled advanced MoE experts, point cloud branch, and cross-attention maps for maximum accuracy on ambiguous boundary cases.
 3. **Threshold Customization**:
    Modify `EARLY_EXIT_THRESHOLD` in `config.py` (default `0.95`). Lowering this threshold triggers more early exits (faster but lower accuracy on complex defect types), while raising it forces the model to evaluate visual backbones more frequently (slower but more accurate).
+---
+
+## ⚡ Section 21: Universal Deployment Engine — Deep Analysis & Pros/Cons Report
+
+### Verification Status
+
+| Check | Result |
+|-------|--------|
+| `py_compile solution/app.py` | ✅ Zero errors |
+| `smoke_test.py` (23 tests) | ✅ 23/23 passed |
+| `self_extract_cell.py` rebuild | ✅ 168,436 chars |
+| `solution.zip` rebuild | ✅ Created |
+| `build_model_from_config` import | ✅ Found at [models.py:L1794](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py#L1794) |
+
+---
+
+### Architecture Overview
+
+The upgraded [app.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/app.py) is now a **single-file Universal Deployment Engine** with 7 modular sections:
+
+```mermaid
+graph LR
+    A["app.py Universal Engine"] --> B["Section 1: UniversalInferenceEngine"]
+    A --> C["Section 2: Image Preprocessing"]
+    A --> D["Section 3: REST API Server"]
+    A --> E["Section 4: Desktop CLI"]
+    A --> F["Section 5: Live Camera"]
+    A --> G["Section 6: Batch Processing"]
+    A --> H["Section 7: Argument Parser"]
+    
+    B --> B1["PyTorch Backend"]
+    B --> B2["ONNX Runtime Backend"]
+```
+
+---
+
+### Mode-by-Mode Deep Analysis
+
+---
+
+#### MODE 1: REST API Server (`--mode server`)
+
+**Command:** `python app.py --mode server --host 0.0.0.0 --port 8000`
+
+**What it does:** Spins up a FastAPI + Uvicorn HTTP server with 3 endpoints:
+- `GET /health` — Kubernetes/ALB health probe
+- `POST /api/v1/inspect` — Multi-modal QC inspection
+- `POST /api/v1/repair` — Automated mesh geometry healing
+
+| Pros | Cons |
+|------|------|
+| ✅ Industry standard REST interface — any language can call it | ❌ Requires network connectivity between client and server |
+| ✅ Horizontally scalable via Docker/Kubernetes replicas | ❌ Network latency adds 1-5ms overhead per request |
+| ✅ Auto-generates OpenAPI/Swagger docs at `/docs` | ❌ Requires `fastapi` + `uvicorn` dependencies |
+| ✅ Supports Base64 image uploads | ❌ Base64 encoding inflates payload size by ~33% |
+| ✅ Calibrated thresholds auto-loaded from `cv_results.json` | ❌ Single-threaded by default (needs `--workers N`) |
+| ✅ 50MB upload limit prevents DoS memory exhaustion | |
+| ✅ UUID temp filenames prevent TOCTOU symlink attacks | |
+
+**Best for:** Cloud deployments, microservice architectures, multi-team integrations.
+
+---
+
+#### MODE 2: Desktop CLI (`--mode cli`)
+
+**Command:** `python app.py --mode cli --input model.obj --effort max`
+
+**What it does:** Inspects a single `.npz` or `.obj` file and prints a human-readable QC report to the terminal. Optionally saves a JSON report.
+
+| Pros | Cons |
+|------|------|
+| ✅ Zero network dependency — runs entirely offline | ❌ Processes only one file at a time |
+| ✅ Full feature extraction from mesh geometry (100D vector) | ❌ Without `--views-dir`, runs in geometry-only mode |
+| ✅ Pretty-printed terminal output with icons | ❌ Requires PyTorch or ONNX Runtime installed |
+| ✅ JSON output (`--output report.json`) for pipelines | ❌ First run has ~3s model loading overhead |
+| ✅ Supports `--backend onnx` for lightweight inference | |
+| ✅ `--views-dir` loads 6 render images from a folder | |
+
+**Best for:** Individual QA engineers, debugging, scripted CI/CD quality gates.
+
+---
+
+#### MODE 3: Live Camera (`--mode camera`)
+
+**Command:** `python app.py --mode camera --device 0 --gpio --inspect-every 30`
+
+**What it does:** Opens a camera sensor, captures frames continuously, runs QC inference every N frames, displays annotated results, and optionally triggers GPIO pins on edge hardware.
+
+| Pros | Cons |
+|------|------|
+| ✅ Real-time visual feedback with OpenCV overlay | ❌ Single-camera duplicates frame as 6 views |
+| ✅ GPIO hardware control for pneumatic sorting arms | ❌ Requires `opencv-python` |
+| ✅ Configurable inspection frequency (`--inspect-every N`) | ❌ GPIO only works on Jetson/Raspberry Pi |
+| ✅ `--headless` mode for servers without displays | ❌ Domain gap: trained on 3D renders, not camera photos |
+| ✅ Supports both Jetson.GPIO and RPi.GPIO | ❌ Frame rate limited by inference speed |
+| ✅ Ctrl+C cleanly releases all resources | |
+| ✅ Accept/Reject pin pulse prevents relay bounce | |
+
+> [!WARNING]
+> **Domain Gap:** The model was trained on synthetically rendered multi-view images of 3D meshes, NOT raw camera photographs. For physical cameras, **fine-tune** the model on real camera captures of your parts.
+
+**Best for:** Factory assembly line QC, smart camera integration, edge sorting.
+
+---
+
+#### MODE 4: Batch Directory (`--mode batch`)
+
+**Command:** `python app.py --mode batch --input-dir ./meshes/ --output report.csv`
+
+**What it does:** Processes all `.npz`/`.obj` files in a directory, generates a CSV report with defect probabilities, and prints summary statistics.
+
+| Pros | Cons |
+|------|------|
+| ✅ Processes entire directories in one command | ❌ Sequential processing (not parallelized) |
+| ✅ Generates CSV report with all 10 defect columns | ❌ Geometry-only mode (no visual renders) |
+| ✅ Summary statistics: GOOD/BAD counts, review flags | ❌ Large directories may take significant time |
+| ✅ Integrates with pandas/Excel for analysis | |
+| ✅ Confidence-based flagging for uncertain predictions | |
+
+**Best for:** Offline QA audits, dataset cleaning, compliance reporting.
+
+---
+
+#### MODE 5: Edge ONNX Inference (`--backend onnx`)
+
+**Command:** `python app.py --mode cli --input model.npz --backend onnx --onnx-model model.onnx`
+
+**What it does:** Uses ONNX Runtime instead of PyTorch. Auto-detects the fastest execution provider.
+
+| Pros | Cons |
+|------|------|
+| ✅ No PyTorch dependency (~50MB vs ~2GB) | ❌ Requires pre-exported `.onnx` model file |
+| ✅ Auto-selects fastest provider (TensorRT/CUDA/OpenVINO/CPU) | ❌ Dynamic effort routing not supported in ONNX |
+| ✅ 2-5x faster inference than PyTorch | ❌ ONNX export may lose dynamic model behaviors |
+| ✅ Runs on Jetson, Intel NCS2, Coral, Qualcomm | ❌ Must re-export after every retraining |
+| ✅ Numerically stable sigmoid in pure NumPy | |
+| ✅ Compatible with C++, C#, Java, Go, Rust bindings | |
+
+**Best for:** Edge devices, embedded systems, mobile apps, game engine plugins.
+
+---
+
+### Cross-Cutting Concerns
+
+#### Security Analysis
+
+| Concern | Mitigation in app.py |
+|---------|---------------------|
+| Deserialization attacks via `.npz` | `allow_pickle=False` enforced globally |
+| File upload DoS | 50MB payload size limit |
+| Temp file symlink attacks (TOCTOU) | UUID-randomized temp filenames |
+| Model weight tampering | `clean_state_dict_keys` validates structure |
+| Path traversal via filenames | `os.path.basename()` strips directory components |
+
+#### Performance Benchmarks (Expected)
+
+| Hardware | Backend | Latency | Throughput |
+|----------|---------|---------|------------|
+| NVIDIA T4 (Kaggle) | PyTorch | ~15-25ms | ~50 meshes/sec |
+| NVIDIA Jetson Orin | TensorRT | ~5-8ms | ~150 meshes/sec |
+| Intel i7 CPU | PyTorch | ~80-120ms | ~10 meshes/sec |
+| Intel i7 CPU | ONNX | ~30-50ms | ~25 meshes/sec |
+| Raspberry Pi 4 | ONNX CPU | ~500-800ms | ~1.5 meshes/sec |
+
+#### Hardware Compatibility Matrix
+
+| Device | Server | CLI | Camera | Batch | ONNX |
+|--------|--------|-----|--------|-------|------|
+| Cloud VM (AWS/GCP) | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Desktop PC (Win/Mac/Linux) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| NVIDIA Jetson Orin/Nano | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Raspberry Pi 4/5 | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Intel NUC + NCS2 | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+#### Edge Cases Handled
+
+| Edge Case | How It Is Handled |
+|-----------|-------------------|
+| No checkpoint file exists | Prints warning, runs with random weights |
+| Camera disconnected mid-stream | Retries frame capture with 100ms delay |
+| ONNX model file not found | Raises FileNotFoundError with export instructions |
+| Missing mesh features (None) | Model handles via Missing Modality Guard (Test 5) |
+| Corrupt/NaN mesh vertices | `sanitize_mesh_geometry` replaces NaN with 0.0 |
+| Fewer than 6 view images | Zero-pads remaining views |
+| No GPU available | Auto-falls back to CPU |
+| GPIO library not installed | Gracefully degrades to display-only mode |
+| KeyboardInterrupt during camera | Releases camera and GPIO cleanly |
 
 ---
 

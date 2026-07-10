@@ -342,24 +342,46 @@ def compute_qem_decimation_stability(vertices: np.ndarray, faces: np.ndarray) ->
 def compute_physics_stability_metric(vertices: np.ndarray, faces: np.ndarray) -> Dict[str, float]:
     """
     Center-of-Mass Support Polygon Physics Tipping Metric (v6.6 SOTA).
-    Calculates center of mass height vs support base radius (tipping angle theta_tip).
+    Calculates center of mass height vs support base radius (tipping angle theta_tip)
+    rotation-invariantly using the PCA axis of minimum thickness as the "up" vector (H4).
     """
     if vertices is None or len(vertices) < 3:
         return {"com_height": 0.0, "support_radius": 0.0, "tipping_angle_deg": 0.0}
 
     com = vertices.mean(axis=0)
-    min_z = np.min(vertices[:, 2])
-    com_height = max(1e-5, float(com[2] - min_z))
+    
+    # Compute local PCA to determine flat "up" direction in a rotation-invariant manner
+    centered = vertices - com
+    cov = np.dot(centered.T, centered) / len(vertices)
+    try:
+        _, eigenvectors = np.linalg.eigh(cov)
+        # Eigenvectors are sorted by eigenvalue ascending. 
+        # The eigenvector with the smallest eigenvalue (index 0) corresponds to the flat/ground axis!
+        up_axis = eigenvectors[:, 0]
+        # Tangent plane basis (indices 1 and 2)
+        tangent_axes = eigenvectors[:, 1:]
+    except Exception:
+        # Fallback to standard Z-up axis if eigendecomposition fails
+        up_axis = np.array([0.0, 0.0, 1.0])
+        tangent_axes = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
 
-    z_range = max(1e-5, float(np.max(vertices[:, 2]) - min_z))
-    base_mask = (vertices[:, 2] - min_z) < (0.05 * z_range)
-    base_verts = vertices[base_mask]
+    # Project coordinates along PCA axes
+    v_up = np.dot(vertices, up_axis)
+    com_up = float(np.dot(com, up_axis))
+    min_up = float(np.min(v_up))
+    
+    com_height = max(1e-5, com_up - min_up)
+    up_range = max(1e-5, float(np.max(v_up) - min_up))
+    
+    base_mask = (v_up - min_up) < (0.05 * up_range)
+    verts_2d = np.dot(vertices, tangent_axes)
+    base_verts_2d = verts_2d[base_mask]
 
-    if len(base_verts) < 3:
-        support_radius = float(np.std(vertices[:, :2]))
+    if len(base_verts_2d) < 3:
+        support_radius = float(np.std(verts_2d))
     else:
-        base_center = base_verts[:, :2].mean(axis=0)
-        support_radius = float(np.mean(np.linalg.norm(base_verts[:, :2] - base_center, axis=1)))
+        base_center = base_verts_2d.mean(axis=0)
+        support_radius = float(np.mean(np.linalg.norm(base_verts_2d - base_center, axis=1)))
 
     support_radius = max(1e-5, support_radius)
     tipping_angle_rad = np.arctan(support_radius / com_height)
@@ -474,7 +496,12 @@ def compute_mesh_features(vertices: np.ndarray, faces: np.ndarray) -> Dict[str, 
     
     # ── Volume (signed volume method) ─────────────────────────────────────
     # V = (1/6) * sum over faces of (v0 · (v1 × v2))
-    signed_volumes = np.sum(v0 * np.cross(v1, v2), axis=1) / 6.0
+    # Center vertices first to make volume translation-invariant for open/flat meshes (H2)
+    centroid_v = vertices.mean(axis=0)
+    v0_c = v0 - centroid_v
+    v1_c = v1 - centroid_v
+    v2_c = v2 - centroid_v
+    signed_volumes = np.sum(v0_c * np.cross(v1_c, v2_c), axis=1) / 6.0
     mesh_volume = float(np.abs(np.sum(signed_volumes)))
     
     features["volume"] = mesh_volume
@@ -488,15 +515,12 @@ def compute_mesh_features(vertices: np.ndarray, faces: np.ndarray) -> Dict[str, 
     # ── Face normals ──────────────────────────────────────────────────────
     face_normals = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-10)
     
-    # Normal variance (high → noisy surface) - P2 FIX: normalize mean normal and clamp dot product
-    mean_norm = face_normals.mean(axis=0)
-    mean_norm = mean_norm / (np.linalg.norm(mean_norm) + 1e-10)
-    dots = np.clip(np.dot(face_normals, mean_norm), -1.0 + 1e-7, 1.0 - 1e-7)
-    normal_angles = np.arccos(dots)
-    
-    features["normal_angle_mean"] = float(np.mean(normal_angles))
-    features["normal_angle_std"] = float(np.std(normal_angles))
-    features["normal_angle_max"] = float(np.max(normal_angles))
+    # Use standard deviation of normal coordinates across faces to measure surface normal variance (H3)
+    # This prevents opposite-facing normal cancellation (which yields constant mean_norm ~ 0 on closed shapes)
+    norm_std_xyz = np.std(face_normals, axis=0)
+    features["normal_angle_mean"] = float(np.mean(norm_std_xyz))
+    features["normal_angle_std"] = float(np.std(norm_std_xyz))
+    features["normal_angle_max"] = float(np.max(norm_std_xyz))
     
     # ── Face quality metrics ──────────────────────────────────────────────
     # Degenerate faces (very small area relative to mean area) - P2 FIX
@@ -567,8 +591,10 @@ def compute_mesh_features(vertices: np.ndarray, faces: np.ndarray) -> Dict[str, 
     # Anomalous PCA ratios indicate non-standard shapes (abstract, partial).
     # Note: 'centered' and 'centroid' already computed above at line 168-169.
     cov = np.dot(centered.T, centered) / max(n_verts, 1)
-    eigenvalues = np.linalg.eigvalsh(cov)[::-1]  # Descending
-    eigenvalues = np.maximum(eigenvalues, 0)
+    eigenvals, eigenvectors = np.linalg.eigh(cov)
+    sort_idx = np.argsort(eigenvals)[::-1]
+    eigenvalues = np.maximum(eigenvals[sort_idx], 0.0)
+    pca_axes = eigenvectors[:, sort_idx]
     pca_total = eigenvalues.sum() + 1e-12
 
     features["pca_ratio_1"] = float(eigenvalues[0] / pca_total)  # Dominant axis
@@ -600,7 +626,6 @@ def compute_mesh_features(vertices: np.ndarray, faces: np.ndarray) -> Dict[str, 
     # ── Depth histogram features ───────────────────────────────────────────
     # Project vertices onto each PCA axis and compute distribution stats.
     # Skewed/kurtotic distributions indicate asymmetric or partial meshes.
-    pca_axes = np.linalg.eigh(cov)[1][:, ::-1]  # Eigenvectors as columns, descending
     projections = centered @ pca_axes  # (V, 3)
 
     for axis_i in range(3):
@@ -950,12 +975,11 @@ def extract_mesh_features_from_file(npz_path: str, extended: bool = True) -> np.
     vertices = np.nan_to_num(data["vertices"], nan=0.0, posinf=1e6, neginf=-1e6)
     faces = np.nan_to_num(data["faces"], nan=0, posinf=0, neginf=0).astype(int)
 
-    # Validate face indices to prevent index-out-of-bounds errors on corrupt meshes
-    if len(faces) > 0 and len(vertices) > 0:
-        valid_mask = (faces[:, 0] >= 0) & (faces[:, 0] < len(vertices)) & \
-                     (faces[:, 1] >= 0) & (faces[:, 1] < len(vertices)) & \
-                     (faces[:, 2] >= 0) & (faces[:, 2] < len(vertices))
-        faces = faces[valid_mask]
+    # Reject completely degenerate meshes before feature extraction (Phase 7)
+    is_degenerate = (len(vertices) < 4) or (len(faces) < 1)
+    if is_degenerate:
+        feat_dim = 100 if extended else 58
+        return np.full(feat_dim, -5.0, dtype=np.float32) # OOD signal
 
     features = compute_mesh_features(vertices, faces)
 
@@ -1000,11 +1024,11 @@ def batch_extract_mesh_features(
     Args:
         item_ids: list of item_id strings
         data_dir: path to directory containing .npz files
-        extended: if True, compute 68 features (with depth-aware features)
+        extended: if True, compute 100 features (with depth-aware features)
         max_corrupt_ratio: maximum allowed fraction of missing/corrupt mesh files before halting
 
     Returns:
-        (N, D) numpy array of features (D=68 if extended, 58 otherwise)/
+        (N, D) numpy array of features (D=100 if extended, 58 otherwise)/
     """
     feat_dim = MESH_FEATURE_DIM_EXTENDED if extended else 58
     all_features = []

@@ -139,6 +139,9 @@ class UniversalInferenceEngine:
                      else getattr(cfg, "MESH_FEATURE_DIM", 58))
         model = build_model_from_config(cfg, effective_mesh_dim=mesh_dim)
 
+        self.scaler_mean = None
+        self.scaler_std = None
+
         ckpt_path = checkpoint_path or os.path.join(sol_dir, "checkpoints", "best_model.pt")
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -146,6 +149,10 @@ class UniversalInferenceEngine:
             state = clean_state_dict_keys(state, model)
             res = model.load_state_dict(state, strict=False)
             print(f"  [Engine] Loaded PyTorch checkpoint: {ckpt_path}")
+            if isinstance(ckpt, dict) and "scaler_mean" in ckpt:
+                self.scaler_mean = ckpt["scaler_mean"]
+                self.scaler_std = ckpt["scaler_std"]
+                print("           Loaded StandardScaler3D statistics.")
             if res.missing_keys:
                 print(f"           Missing keys: {res.missing_keys[:5]}...")
         else:
@@ -203,6 +210,11 @@ class UniversalInferenceEngine:
             dict with quality, defect_probabilities, confidence, latency, etc.
         """
         t0 = time.time()
+
+        if mesh_features is not None and self.scaler_mean is not None:
+            # Scale input features using serialized scaler parameters (H6)
+            mesh_features = np.where(np.isnan(mesh_features) | np.isinf(mesh_features), self.scaler_mean, mesh_features)
+            mesh_features = (mesh_features - self.scaler_mean) / (self.scaler_std + 1e-7)
 
         if self.backend == "onnx":
             probs = self._predict_onnx(views, mesh_features)

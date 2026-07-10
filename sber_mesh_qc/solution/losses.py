@@ -33,9 +33,13 @@ class AsymmetricLoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.reduction = reduction
     
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
         if self.label_smoothing > 0:
-            targets = targets * (1.0 - self.label_smoothing) + self.label_smoothing / 2.0
+            targets = torch.where(
+                targets > 0.5,
+                torch.ones_like(targets),
+                torch.full_like(targets, self.label_smoothing)
+            )
 
         probs = torch.sigmoid(logits)
         
@@ -57,9 +61,10 @@ class AsymmetricLoss(nn.Module):
         
         loss = -(pos_loss + neg_loss)
         
-        if self.reduction == "mean":
+        red = reduction if reduction is not None else self.reduction
+        if red == "mean":
             return loss.mean()
-        elif self.reduction == "sum":
+        elif red == "sum":
             return loss.sum()
         return loss
 
@@ -82,9 +87,13 @@ class FocalLoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.reduction = reduction
     
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
         if self.label_smoothing > 0:
-            targets = targets * (1 - self.label_smoothing) + self.label_smoothing / 2
+            targets = torch.where(
+                targets > 0.5,
+                torch.ones_like(targets),
+                torch.full_like(targets, self.label_smoothing)
+            )
         
         probs = torch.sigmoid(logits)
         
@@ -97,9 +106,10 @@ class FocalLoss(nn.Module):
         if self.alpha is not None:
             loss = loss * self.alpha.unsqueeze(0)
         
-        if self.reduction == "mean":
+        red = reduction if reduction is not None else self.reduction
+        if red == "mean":
             return loss.mean()
-        elif self.reduction == "sum":
+        elif red == "sum":
             return loss.sum()
         return loss
 
@@ -116,17 +126,24 @@ class WeightedBCELoss(nn.Module):
         self.label_smoothing = label_smoothing
         self.reduction = reduction
     
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
         if self.label_smoothing > 0:
-            targets = targets * (1 - self.label_smoothing) + self.label_smoothing / 2
+            targets = torch.where(
+                targets > 0.5,
+                torch.ones_like(targets),
+                torch.full_like(targets, self.label_smoothing)
+            )
         
         loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         
         if self.class_weights is not None:
             loss = loss * self.class_weights.unsqueeze(0)
         
-        if self.reduction == "mean":
+        red = reduction if reduction is not None else self.reduction
+        if red == "mean":
             return loss.mean()
+        elif red == "sum":
+            return loss.sum()
         return loss
 
 
@@ -137,13 +154,15 @@ class HybridFocalASLLoss(nn.Module):
         self.focal = FocalLoss(gamma=2.0, label_smoothing=label_smoothing, reduction="none")
         self.reduction = reduction
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        loss_asl = self.asl(logits, targets)
-        loss_focal = self.focal(logits, targets)
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
+        loss_asl = self.asl(logits, targets, reduction="none")
+        loss_focal = self.focal(logits, targets, reduction="none")
         loss = 0.6 * loss_asl + 0.4 * loss_focal
-        if self.reduction == "mean":
+        
+        red = reduction if reduction is not None else self.reduction
+        if red == "mean":
             return loss.mean()
-        elif self.reduction == "sum":
+        elif red == "sum":
             return loss.sum()
         return loss
 
@@ -153,6 +172,7 @@ def build_loss_function(
     class_weights: np.ndarray = None,
     label_smoothing: float = 0.05,
     focal_gamma: float = 2.0,
+    reduction: str = "mean",
 ) -> nn.Module:
     alpha = None
     if class_weights is not None:
@@ -160,19 +180,19 @@ def build_loss_function(
         alpha = alpha / alpha.mean()
     
     if loss_name == "bce":
-        return WeightedBCELoss(alpha, label_smoothing)
+        return WeightedBCELoss(alpha, label_smoothing, reduction)
     
     elif loss_name == "bce_focal":
-        return FocalLoss(gamma=focal_gamma, alpha=alpha, label_smoothing=label_smoothing)
+        return FocalLoss(gamma=focal_gamma, alpha=alpha, label_smoothing=label_smoothing, reduction=reduction)
     
     elif loss_name == "asl":
-        return AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.0, clip=0.05, label_smoothing=label_smoothing)
+        return AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.0, clip=0.05, label_smoothing=label_smoothing, reduction=reduction)
     
     elif loss_name == "hybrid_asl":
-        return HybridFocalASLLoss(gamma_neg=4.0, gamma_pos=1.0, clip=0.05, label_smoothing=label_smoothing)
+        return HybridFocalASLLoss(gamma_neg=4.0, gamma_pos=1.0, clip=0.05, label_smoothing=label_smoothing, reduction=reduction)
     
     elif loss_name == "quality_focal":
-        return QualityAwareHardDefectFocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing)
+        return QualityAwareHardDefectFocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing, reduction=reduction)
     
     else:
         raise ValueError(f"Unknown loss: {loss_name}")
@@ -232,15 +252,20 @@ class QualityAwareHardDefectFocalLoss(nn.Module):
     Dynamically reweights loss gradients by focusing extra penalty on false negative predictions
     that directly ruin the competition quality label (quality = 1 iff ALL 10 defects = 0).
     """
-    def __init__(self, gamma: float = 2.5, quality_boost: float = 2.0, label_smoothing: float = 0.05):
+    def __init__(self, gamma: float = 2.5, quality_boost: float = 2.0, label_smoothing: float = 0.05, reduction: str = "mean"):
         super().__init__()
         self.gamma = gamma
         self.quality_boost = quality_boost
         self.label_smoothing = label_smoothing
+        self.reduction = reduction
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
         if self.label_smoothing > 0:
-            targets = targets * (1.0 - self.label_smoothing) + self.label_smoothing / 2.0
+            targets = torch.where(
+                targets > 0.5,
+                torch.ones_like(targets),
+                torch.full_like(targets, self.label_smoothing)
+            )
 
         probs = torch.sigmoid(logits)
         p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
@@ -252,4 +277,34 @@ class QualityAwareHardDefectFocalLoss(nn.Module):
 
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         loss = focal_weight * quality_multiplier * bce
-        return loss.mean()
+        
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
+class CleanMeshShieldLoss(nn.Module):
+    """
+    Exponentially penalizes any predicted defect probability > 0.0 
+    when the ground truth is a perfectly clean mesh (all defects = 0).
+    Prevents the catastrophic quality F1 drop from single False Positives.
+    """
+    def __init__(self, shield_weight: float = 8.0, sharpness: float = 12.0):
+        super().__init__()
+        self.shield_weight = shield_weight
+        self.sharpness = sharpness
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # Identify perfectly clean samples in the batch
+        clean_mask = (targets.sum(dim=1) == 0)
+        if not clean_mask.any():
+            return torch.tensor(0.0, device=logits.device)
+        
+        # For clean samples, push ALL probabilities toward 0
+        clean_logits = logits[clean_mask]
+        prob = torch.sigmoid(clean_logits)
+        # Steep penalty above 0.0 using exp or power function
+        clean_loss = torch.mean(self.shield_weight * (prob ** self.sharpness))
+        return clean_loss

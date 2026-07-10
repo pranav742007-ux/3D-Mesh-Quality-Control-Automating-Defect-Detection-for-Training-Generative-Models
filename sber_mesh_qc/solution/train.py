@@ -258,10 +258,11 @@ def _multilabel_mixup(
     if pc is not None:
         mixed_pc = lam * pc + (1 - lam) * pc[index]
 
-    # Mix labels: element-wise max (union of defect sets) with smoothing
-    mixed_labels = torch.maximum(labels, labels[index])
+    # Mix labels: Asymmetric Interpolation (Phase 2)
+    mixed_labels = lam * labels + (1 - lam) * labels[index]
+    mixed_labels = torch.where(mixed_labels > 0.5, torch.ones_like(mixed_labels), mixed_labels)
     if label_smooth > 0:
-        mixed_labels = mixed_labels * (1.0 - label_smooth) + label_smooth * 0.5
+        mixed_labels = mixed_labels * (1.0 - label_smooth) + label_smooth * 0.0
 
     return mixed_views, mixed_labels, mixed_mesh_feat, mixed_pc
 
@@ -363,6 +364,16 @@ def train_one_fold(
         effective_mesh_dim = mesh_feat_train.shape[1]
     else:
         effective_mesh_dim = MESH_FEATURE_DIM_EXTENDED if USE_EXTENDED_FEATURES else MESH_FEATURE_DIM
+
+    # Fit scaler on training features only (H6)
+    from mesh_features import StandardScaler3D
+    scaler_3d = StandardScaler3D()
+    if mesh_feat_train is not None:
+        mesh_feat_train = scaler_3d.fit_transform(mesh_feat_train)
+        if mesh_feat_val is not None:
+            mesh_feat_val = scaler_3d.transform(mesh_feat_val)
+    else:
+        scaler_3d = None
 
     # ── Prepare labels by filtering the FULL dataframe ────────────────────
     train_indexed = train_df.set_index("item_id")
@@ -627,18 +638,41 @@ def train_one_fold(
                     def checkpointed_forward(view_batch):
                         return checkpoint(original_forward, view_batch, use_reentrant=False)
                     raw_model.image_model._extract_view_features = checkpointed_forward
-
-                # v3.0: MoE returns (logits, aux_info), single model returns logits
-                if is_moe:
-                    logits, aux_info = model(views, mesh_feat, pc)
+                    try:
+                        if is_moe:
+                            logits, aux_info = model(views, mesh_feat, pc)
+                        else:
+                            logits = model(views, mesh_feat, pc)
+                    finally:
+                        raw_model.image_model._extract_view_features = original_forward
                 else:
-                    logits = model(views, mesh_feat, pc)
+                    if is_moe:
+                        logits, aux_info = model(views, mesh_feat, pc)
+                    else:
+                        logits = model(views, mesh_feat, pc)
 
-                # Restore original forward after checkpoint
-                if USE_GRADIENT_CHECKPOINTING and model.training and not is_moe:
-                    raw_model.image_model._extract_view_features = original_forward
-
-                loss = criterion(logits, labels)
+                # OHEM: Compute per-sample loss, keep only top 30% hardest (Phase 3)
+                if getattr(_cfg, "USE_OHEM", False):
+                    per_sample_loss = criterion(logits, labels, reduction='none').mean(dim=1)
+                    k = max(1, int(per_sample_loss.shape[0] * 0.3))
+                    topk_indices = per_sample_loss.topk(k, largest=True).indices
+                    
+                    ohem_loss = criterion(logits[topk_indices], labels[topk_indices])
+                    loss = ohem_loss
+                    
+                    # Add Clean Shield AFTER OHEM (Phase 1)
+                    if getattr(_cfg, "USE_CLEAN_SHIELD", False):
+                        if not hasattr(model, 'clean_shield'):
+                            from losses import CleanMeshShieldLoss
+                            model.clean_shield = CleanMeshShieldLoss().to(DEVICE)
+                        loss = loss + model.clean_shield(logits[topk_indices], labels[topk_indices])
+                else:
+                    loss = criterion(logits, labels)
+                    if getattr(_cfg, "USE_CLEAN_SHIELD", False):
+                        if not hasattr(model, 'clean_shield'):
+                            from losses import CleanMeshShieldLoss
+                            model.clean_shield = CleanMeshShieldLoss().to(DEVICE)
+                        loss = loss + model.clean_shield(logits, labels)
 
                 if getattr(_cfg, "USE_KIMI_DPO_LOSS", False):
                     from models import KimiQualityPreferenceLoss
@@ -762,6 +796,8 @@ def train_one_fold(
                     "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                     "ema_state_dict": ema.state_dict() if ema is not None else None,
                     "scaler_state_dict": scaler.state_dict(),
+                    "scaler_mean": scaler_3d.mean if scaler_3d else None,
+                    "scaler_std": scaler_3d.std if scaler_3d else None,
                 }
                 torch.save(checkpoint_payload, best_path)
                 
@@ -783,6 +819,8 @@ def train_one_fold(
                 "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                 "ema_state_dict": ema.state_dict() if ema is not None else None,
                 "scaler_state_dict": scaler.state_dict(),
+                "scaler_mean": scaler_3d.mean if scaler_3d else None,
+                "scaler_std": scaler_3d.std if scaler_3d else None,
             }
             torch.save(last_payload, last_path)
 
@@ -994,6 +1032,12 @@ def train_full_cv(
     all_fold_results = []
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(item_ids, stratify_labels)):
+        # OVERRIDE BACKBONE FOR THIS FOLD (Heterogeneous CV - Step 1)
+        import config as _cfg
+        if hasattr(_cfg, "HETERO_CV_BACKBONES") and _cfg.HETERO_CV_BACKBONES:
+            _cfg.IMAGE_BACKBONE = _cfg.HETERO_CV_BACKBONES[fold % len(_cfg.HETERO_CV_BACKBONES)]
+            print(f"  [HETERO CV] Fold {fold} using backbone: {_cfg.IMAGE_BACKBONE}")
+
         fold_train_ids = item_ids[train_idx].tolist()
         fold_val_ids = item_ids[val_idx].tolist()
 

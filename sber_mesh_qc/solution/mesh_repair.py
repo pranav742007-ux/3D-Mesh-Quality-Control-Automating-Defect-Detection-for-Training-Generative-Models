@@ -79,12 +79,13 @@ def find_boundary_edge_loops(faces: np.ndarray) -> List[List[int]]:
         curr = start_node
 
         while True:
-            # P1-23 FIX: Prefer neighbor connected back to start_node if loop length >= 3
+            # Prioritize closing the loop back to the start node (H7)
+            if len(loop) >= 3 and start_node in adj.get(curr, []):
+                loops.append(loop)
+                break
+                
             neighbors = [n for n in adj.get(curr, []) if n not in visited]
             if not neighbors:
-                # Check if loop closes back to start_node
-                if start_node in adj.get(curr, []) and len(loop) >= 3:
-                    loops.append(loop)
                 break
             nxt = neighbors[0]
             loop.append(nxt)
@@ -112,16 +113,137 @@ def repair_open_holes(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarr
         existing_edges.add((f[1], f[2]))
         existing_edges.add((f[2], f[0]))
 
+def triangulate_loop_3d(vertices: np.ndarray, loop: list) -> list:
+    """
+    Robust 3D boundary loop triangulation using 2D projection and ear-clipping.
+    Falls back to fan triangulation if ear-clipping fails to clip all ears.
+    """
+    n_pts = len(loop)
+    if n_pts < 3:
+        return []
+
+    # 1. Project 3D loop vertices onto their PCA plane of best fit
+    loop_pts = vertices[loop]
+    centroid = loop_pts.mean(axis=0)
+    centered = loop_pts - centroid
+    cov = np.dot(centered.T, centered) / n_pts
+    try:
+        _, eigenvectors = np.linalg.eigh(cov)
+        # The first two eigenvectors form the 2D basis
+        basis_x = eigenvectors[:, 2]
+        basis_y = eigenvectors[:, 1]
+        pts_2d = np.zeros((n_pts, 2))
+        pts_2d[:, 0] = np.dot(centered, basis_x)
+        pts_2d[:, 1] = np.dot(centered, basis_y)
+    except Exception:
+        # Fallback to simple XY projection
+        pts_2d = loop_pts[:, :2]
+
+    # 2. Ear-clipping algorithm in 2D
+    def is_convex(p1, p2, p3):
+        return (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0]) >= 0
+
+    def in_triangle(p, a, b, c):
+        def sign(p1, p2, p3):
+            return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+        d1 = sign(p, a, b)
+        d2 = sign(p, b, c)
+        d3 = sign(p, c, a)
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        return not (has_neg and has_pos)
+
+    # Check overall orientation (clockwise vs counter-clockwise)
+    orient_sum = 0.0
+    for i in range(n_pts):
+        p_curr = pts_2d[i]
+        p_next = pts_2d[(i + 1) % n_pts]
+        orient_sum += (p_next[0] - p_curr[0]) * (p_next[1] + p_curr[1])
+    is_ccw = orient_sum < 0
+
+    remaining_indices = list(range(n_pts))
+    triangles = []
+    
+    max_iters = n_pts * 10
+    iter_count = 0
+    
+    while len(remaining_indices) >= 3 and iter_count < max_iters:
+        iter_count += 1
+        clipped = False
+        L = len(remaining_indices)
+        for i in range(L):
+            idx_u = remaining_indices[i - 1]
+            idx_v = remaining_indices[i]
+            idx_w = remaining_indices[(i + 1) % L]
+            
+            u = loop[idx_u]
+            v = loop[idx_v]
+            w = loop[idx_w]
+            
+            pu, pv, pw = pts_2d[idx_u], pts_2d[idx_v], pts_2d[idx_w]
+            
+            convex = is_convex(pu, pv, pw) == is_ccw
+            if not convex:
+                continue
+                
+            ear = True
+            for j in range(L):
+                idx_j = remaining_indices[j]
+                if idx_j in (idx_u, idx_v, idx_w):
+                    continue
+                pj = pts_2d[idx_j]
+                if in_triangle(pj, pu, pv, pw):
+                    ear = False
+                    break
+                    
+            if ear:
+                triangles.append([u, v, w])
+                remaining_indices.pop(i)
+                clipped = True
+                break
+                
+        if not clipped:
+            break
+
+    # 3. Fallback to fan triangulation for remaining vertices
+    if len(remaining_indices) >= 3:
+        v0 = loop[remaining_indices[0]]
+        for i in range(1, len(remaining_indices) - 1):
+            v1 = loop[remaining_indices[i]]
+            v2 = loop[remaining_indices[i + 1]]
+            triangles.append([v0, v1, v2])
+            
+    return triangles
+
+
+def repair_open_holes(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Ear-clipping triangulation algorithm closing non-manifold boundary edge loops.
+    """
+    if vertices is None or faces is None or len(faces) == 0:
+        return vertices, faces, 0
+
+    loops = find_boundary_edge_loops(faces)
+    if not loops:
+        return vertices, faces, 0
+
+    existing_edges = set()
+    for f in faces:
+        existing_edges.add((f[0], f[1]))
+        existing_edges.add((f[1], f[2]))
+        existing_edges.add((f[2], f[0]))
+
     new_faces = list(faces)
     holes_filled = 0
 
     for loop in loops:
         if len(loop) < 3:
             continue
-        v0 = loop[0]
+        
+        loop_triangles = triangulate_loop_3d(vertices, loop)
         added_any = False
-        for i in range(1, len(loop) - 1):
-            v1, v2 = loop[i], loop[i + 1]
+        
+        for v0, v1, v2 in loop_triangles:
             # Skip if tri edge already exists in mesh (prevents duplicate non-manifold edges)
             if (v0, v1) in existing_edges or (v1, v2) in existing_edges or (v2, v0) in existing_edges:
                 continue
@@ -138,6 +260,7 @@ def repair_open_holes(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarr
             existing_edges.add((v1, v2))
             existing_edges.add((v2, v0))
             added_any = True
+            
         if added_any:
             holes_filled += 1
 

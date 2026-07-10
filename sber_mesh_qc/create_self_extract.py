@@ -16,7 +16,12 @@ with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 rel_path = os.path.relpath(full_path, sol_dir).replace("\\", "/")
                 zf.write(full_path, rel_path)
 
-b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+# Write solution.zip directly to workspace (Step 10)
+zip_data = buf.getvalue()
+with open(os.path.join(os.path.dirname(sol_dir), "solution.zip"), "wb") as f:
+    f.write(zip_data)
+
+b64_str = base64.b64encode(zip_data).decode("utf-8")
 
 out_path = r"c:\Users\Asus\Downloads\sber_mesh_qc\sber_mesh_qc\self_extract_cell.py"
 with open(out_path, "w", encoding="utf-8") as out:

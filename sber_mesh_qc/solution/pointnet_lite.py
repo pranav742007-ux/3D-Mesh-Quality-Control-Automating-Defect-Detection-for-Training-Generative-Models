@@ -79,6 +79,12 @@ class PointNetLite(nn.Module):
         """
         B, N, C = points.shape
 
+        # Center and scale-normalize points to unit sphere for translation/scale invariance
+        mean = points.mean(dim=1, keepdim=True)
+        points = points - mean
+        max_norm = points.norm(dim=-1, keepdim=True).max(dim=1, keepdim=True)[0]
+        points = points / (max_norm + 1e-10)
+
         # Per-point feature extraction: (B, N, 128)
         x = self.mlp1(points.reshape(B * N, C)).reshape(B, N, 128)
 
@@ -98,6 +104,7 @@ def sample_point_cloud(
     faces: np.ndarray,
     num_points: int = 1024,
     method: str = "face_area",
+    seed: Optional[int] = None,
 ) -> np.ndarray:
     """
     Sample a fixed number of points from a mesh surface.
@@ -116,13 +123,16 @@ def sample_point_cloud(
     Returns:
         (num_points, 3) sampled point coordinates
     """
+    from typing import Optional
+    rng = np.random.RandomState(seed) if seed is not None else np.random
+
     n_faces = len(faces)
     if n_faces == 0:
         # Fallback: jitter vertices
         if len(vertices) == 0:
             return np.zeros((num_points, 3), dtype=np.float32)
-        idx = np.random.choice(len(vertices), size=num_points, replace=True)
-        return vertices[idx].astype(np.float32) + np.random.normal(0, 1e-4, (num_points, 3))
+        idx = rng.choice(len(vertices), size=num_points, replace=True)
+        return vertices[idx].astype(np.float32) + rng.normal(0, 1e-4, (num_points, 3))
 
     v0 = vertices[faces[:, 0]]
     v1 = vertices[faces[:, 1]]
@@ -141,11 +151,11 @@ def sample_point_cloud(
     probs = probs / probs.sum()
 
     # Sample faces
-    face_idx = np.random.choice(n_faces, size=num_points, p=probs)
+    face_idx = rng.choice(n_faces, size=num_points, p=probs)
 
     # Sample random barycentric coordinates within each selected face
-    r1 = np.random.random(num_points)
-    r2 = np.random.random(num_points)
+    r1 = rng.random(num_points)
+    r2 = rng.random(num_points)
     # Ensure uniform sampling in triangle
     sqrt_r1 = np.sqrt(r1)
     bary = np.stack([1 - sqrt_r1, sqrt_r1 * (1 - r2), sqrt_r1 * r2], axis=-1)
@@ -197,14 +207,17 @@ def batch_extract_point_clouds(
     all_clouds = []
     missing = []
 
-    for item_id in tqdm(item_ids, desc="Extracting point clouds"):
+    import config as cfg
+    base_seed = getattr(cfg, "SEED", 42)
+
+    for idx, item_id in enumerate(tqdm(item_ids, desc="Extracting point clouds")):
         safe_item_id = _sanitize_item_id(item_id)
         npz_path = os.path.join(data_dir, f"{safe_item_id}.npz")
         try:
             data = np.load(npz_path, allow_pickle=False)
             vertices = data["vertices"]
             faces = data["faces"]
-            cloud = sample_point_cloud(vertices, faces, num_points)
+            cloud = sample_point_cloud(vertices, faces, num_points, seed=base_seed + idx)
             all_clouds.append(cloud)
         except Exception as e:
             missing.append((item_id, str(e)))

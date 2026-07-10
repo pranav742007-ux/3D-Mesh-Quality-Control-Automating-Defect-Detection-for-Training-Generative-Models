@@ -618,17 +618,22 @@ class TTATransform:
 
     def apply(self, views_tensor: torch.Tensor) -> list:
         """
-        Apply all TTA variants to a (V, 3, H, W) tensor.
-        Returns list of (V, 3, H, W) tensors.
+        Apply all TTA variants to a views tensor.
+        Returns list of views tensors.
         """
         results = []
         for t in self.transforms:
             v = views_tensor.clone()
             if t["flip"]:
-                v = torch.flip(v, dims=[3])  # Horizontal flip
+                v = torch.flip(v, dims=[3])  # Flip height/width
             if t["rotation"] != 0:
                 v = torch.rot90(v, k=t["rotation"] // 90, dims=[2, 3])
             results.append(v)
+            
+        # Photometric TTA: Test rendering robustness (Step 5)
+        results.append((views_tensor * 1.05).clamp(0, 1))         # Brightness +
+        results.append(((views_tensor - 0.5) * 1.1) + 0.5).clamp(0, 1) # Contrast +
+
         return results
 
 

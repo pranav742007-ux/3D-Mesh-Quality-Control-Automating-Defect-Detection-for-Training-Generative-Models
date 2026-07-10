@@ -24,7 +24,8 @@ def tune_early_exit_threshold(
     val_dataset, 
     val_labels_df, 
     device=cfg.DEVICE, 
-    thresholds=np.linspace(0.80, 0.99, 20)
+    thresholds=np.linspace(0.80, 0.99, 20),
+    clf_thresholds=None,
 ):
     print("  Evaluating base model and geometry confidence scores on validation set...")
     
@@ -106,10 +107,13 @@ def tune_early_exit_threshold(
     true_df = pd.DataFrame(true_labels, columns=defect_cols)
     true_df["quality"] = derive_quality(true_labels)
     
+    if clf_thresholds is None:
+        clf_thresholds = np.full(len(defect_cols), 0.5)
+        
     for thresh in thresholds:
         early_exit_mask = (conf_scores >= thresh)
         preds = np.where(early_exit_mask[:, None], mesh_probs, full_preds)
-        preds_binary = (preds >= 0.5).astype(int)
+        preds_binary = (preds >= clf_thresholds).astype(int)
         
         pred_df = pd.DataFrame(preds_binary, columns=defect_cols)
         pred_df["quality"] = derive_quality(preds_binary)

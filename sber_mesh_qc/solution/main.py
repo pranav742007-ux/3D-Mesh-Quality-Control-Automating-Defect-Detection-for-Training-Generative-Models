@@ -133,7 +133,7 @@ def step_extract_features(data_dir, base_dir, extended=True):
     train_df = pd.read_csv(train_csv)
     train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     train_ids = [str(x) for x in train_df["item_id"].tolist()]
-    expected_train_dim = 68 if extended else 58
+    expected_train_dim = 100 if extended else 58
 
     def _validate_and_load_cache(cache_path: str, expected_ids: list, expected_dim: int) -> Optional[np.ndarray]:
         if not os.path.isfile(cache_path):
@@ -393,6 +393,87 @@ def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path
     return submission_path
 
 
+def step_pseudo_label(test_features, data_dir, checkpoint_dir, log_dir, point_clouds=None):
+    """
+    Self-Training: Predict on test set, keep predictions with >98% confidence,
+    and save augmented dataset to train_pseudo.csv.
+    """
+    print("\n" + "=" * 60)
+    print("  STEP: PSEUDO-LABELING TEST SET (SELF-TRAINING)")
+    print("=" * 60)
+
+    test_csv = os.path.join(data_dir, "test.csv")
+    test_df = pd.read_csv(test_csv)
+    test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
+    if "Unnamed: 0" in test_df.columns:
+        test_df = test_df.drop(columns=["Unnamed: 0"])
+    test_ids = test_df["item_id"].tolist()
+
+    test_image_dir = os.path.join(data_dir, "test")
+    if not os.path.isdir(test_image_dir):
+        for candidate in [data_dir, os.path.join(data_dir, "test_images")]:
+            if os.path.isdir(candidate) and any(f.endswith(".png") for f in os.listdir(candidate)[:5]):
+                test_image_dir = candidate
+                break
+
+    cv_results_path = os.path.join(log_dir, "cv_results.json")
+
+    # 1. Run ensembled inference
+    from inference import ensemble_inference
+    import config as cfg
+
+    print(f"  Test image directory: {test_image_dir}")
+    print(f"  Checkpoint directory: {checkpoint_dir}")
+    print(f"  CV results: {cv_results_path}")
+
+    # Generate probabilities (returned as second return value of ensemble_inference)
+    _, proba_df = ensemble_inference(
+        test_ids=test_ids,
+        test_image_dir=test_image_dir,
+        checkpoint_dir=checkpoint_dir,
+        mesh_features=test_features,
+        point_clouds=point_clouds,
+        cv_results_path=cv_results_path,
+        effort="max",
+    )
+
+    test_proba = proba_df[cfg.DEFECT_COLS].values
+
+    # 2. Filter for high-confidence predictions (probability > 98% or < 2%)
+    max_probs = test_proba.max(axis=1)
+    min_probs = test_proba.min(axis=1)
+    confidence_mask = (max_probs > 0.98) | (min_probs < 0.02)
+
+    pseudo_indices = np.where(confidence_mask)[0]
+    print(f"\n  Found {len(pseudo_indices)} high-confidence pseudo-labels out of {len(test_ids)} total test samples.")
+
+    if len(pseudo_indices) == 0:
+        print("  [WARNING] No high-confidence pseudo-labels found. Skipping augmentation.")
+        return
+
+    # 3. Generate pseudo-labeled DataFrame
+    from utils import derive_quality
+    pseudo_preds = (test_proba[pseudo_indices] >= 0.5).astype(int)
+    pseudo_df = pd.DataFrame(pseudo_preds, columns=cfg.DEFECT_COLS)
+    pseudo_df.insert(0, "item_id", [test_ids[i] for i in pseudo_indices])
+    pseudo_df["quality"] = derive_quality(pseudo_preds)
+
+    # 4. Append to train.csv and save train_pseudo.csv
+    train_df = pd.read_csv(os.path.join(data_dir, "train.csv"))
+    # Clean up train columns
+    train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
+    if "Unnamed: 0" in train_df.columns:
+        train_df = train_df.drop(columns=["Unnamed: 0"])
+
+    augmented_train_df = pd.concat([train_df, pseudo_df], ignore_index=True)
+    augmented_path = os.path.join(data_dir, "train_pseudo.csv")
+    augmented_train_df.to_csv(augmented_path, index=False)
+    print(f"  [OK] Saved augmented training dataset with pseudo-labels to: {augmented_path}")
+    print(f"       Original train samples: {len(train_df)}")
+    print(f"       Added pseudo-labels:    {len(pseudo_df)}")
+    print(f"       Total train_pseudo:     {len(augmented_train_df)}")
+
+
 def _find_npz_dir(data_dir, split="train"):
     """Find the directory containing .npz files."""
     candidates = [
@@ -423,9 +504,10 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="full",
-        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images"],
+        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images", "pseudo_label", "pseudo-label"],
         help="Pipeline mode: full (everything), download, features, train, infer, "
-             "all_no_download (features+train+infer), preprocess_images (offline cropping)",
+             "all_no_download (features+train+infer), preprocess_images (offline cropping), "
+             "pseudo_label (self-training test pseudo-label generation)",
     )
     parser.add_argument("--base-dir", "--base_dir", type=str, default=None,
                         help="Project base directory (auto-detected if not set)")
@@ -702,6 +784,17 @@ def main():
             preprocess_images_offline(test_img_dir, test_out_dir, test_ids, image_size=config.IMAGE_SIZE)
             
         print("[OK] Offline image preprocessing complete.")
+
+    elif args.mode in ["pseudo_label", "pseudo-label"]:
+        if test_features is None:
+            _, test_features = step_extract_features(
+                data_dir, base_dir, extended=config.USE_EXTENDED_FEATURES
+            )
+        if config.USE_POINTNET_BRANCH and test_pcs is None:
+            _, test_pcs = step_extract_point_clouds(
+                data_dir, base_dir, num_points=config.POINTNET_NUM_POINTS
+            )
+        step_pseudo_label(test_features, data_dir, checkpoint_dir, log_dir, test_pcs)
 
     print("\n" + "=" * 60)
     print("  PIPELINE COMPLETE")

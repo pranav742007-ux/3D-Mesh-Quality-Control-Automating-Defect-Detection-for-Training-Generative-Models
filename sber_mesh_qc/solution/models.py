@@ -752,18 +752,6 @@ class MeshFeatureMLP(nn.Module):
         return self.network(mesh_features)
 
 
-class MultiSampleDropout(nn.Module):
-    """
-    Multi-Sample Dropout (MSDO) for stronger regularization and higher F1 score.
-    Applies 5 parallel dropout masks and averages their classifier outputs.
-    """
-    def __init__(self, in_features: int, out_features: int, num_samples: int = 5, dropout_rate: float = 0.3):
-        super().__init__()
-        self.dropouts = nn.ModuleList([nn.Dropout(dropout_rate) for _ in range(num_samples)])
-        self.classifier = nn.Linear(in_features, out_features)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.mean(torch.stack([self.classifier(drop(x)) for drop in self.dropouts], dim=0), dim=0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -819,6 +807,17 @@ class FusedEnsembleModel(nn.Module):
                 nn.Dropout(0.2),
                 nn.Linear(64, self.num_classes),
             )
+        elif fusion_method == "transformer":
+            # Project modality probability vectors (10-dim) to 64-dim sequence tokens
+            self.img_prob_proj = nn.Linear(self.num_classes, 64)
+            self.mesh_prob_proj = nn.Linear(self.num_classes, 64)
+            if pointnet_model is not None:
+                self.pn_prob_proj = nn.Linear(self.num_classes, 64)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=64, nhead=4, dim_feedforward=128, dropout=0.1, batch_first=True
+            )
+            self.fusion_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+            self.fusion_head = nn.Linear(64, self.num_classes)
 
     def forward(
         self,
@@ -859,6 +858,23 @@ class FusedEnsembleModel(nn.Module):
         elif self.fusion_method == "concat_mlp":
             concat = torch.cat([p for _, p in probs_list], dim=1)
             return self.fusion_mlp(concat)
+
+        elif self.fusion_method == "transformer":
+            img_token = self.img_prob_proj(image_probs).unsqueeze(1)
+            tokens = [img_token]
+            if mesh_features is not None:
+                mesh_token = self.mesh_prob_proj(mesh_probs).unsqueeze(1)
+                tokens.append(mesh_token)
+            else:
+                tokens.append(torch.zeros_like(img_token))
+            
+            if self.pointnet_model is not None and point_cloud is not None:
+                pn_token = self.pn_prob_proj(pn_probs).unsqueeze(1)
+                tokens.append(pn_token)
+            
+            seq = torch.cat(tokens, dim=1)
+            fused = self.fusion_transformer(seq)
+            return self.fusion_head(fused[:, 0, :])
 
         else:
             raise ValueError(f"Unknown fusion method: {self.fusion_method}")

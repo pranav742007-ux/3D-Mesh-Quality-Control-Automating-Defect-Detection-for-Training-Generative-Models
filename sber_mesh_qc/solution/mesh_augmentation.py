@@ -50,6 +50,11 @@ def augment_mesh_geometry(
             keep_indices = rng.choice(len(faces), size=len(faces) - n_drop, replace=False)
             aug_faces = faces[keep_indices]
             
+            # Remap vertices to exclude unreferenced ones and prevent feature corruption (CR1)
+            unique_v, remapped = np.unique(aug_faces, return_inverse=True)
+            aug_vertices = aug_vertices[unique_v]
+            aug_faces = remapped.reshape(-1, 3)
+            
     return aug_vertices, aug_faces
 
 
@@ -93,7 +98,7 @@ def generate_offline_augmentations(
         for i in range(num_augmentations):
             dst_path = os.path.join(output_aug_dir, f"{safe_id}_aug_{i}.npz")
             if not os.path.isfile(dst_path):
-                tasks.append((src_path, dst_path, i, noise_std, hole_ratio))
+                tasks.append((src_path, dst_path, len(tasks), noise_std, hole_ratio))
                 
     if not tasks:
         print("[Offline Augment] All augmented meshes already exist.")

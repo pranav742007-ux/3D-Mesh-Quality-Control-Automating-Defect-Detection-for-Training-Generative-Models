@@ -50,7 +50,20 @@ def export_to_onnx(
     if use_spatial_tokens is None:
         use_spatial_tokens = getattr(cfg, "USE_SPATIAL_VIEW_TOKENS", False)
         
-    backbone_name = getattr(cfg, "IMAGE_BACKBONE", "efficientnetv2_s")
+    # Detect fold index from checkpoint filename (e.g. best_fold1.pt -> fold 1)
+    fold_idx = 0
+    if checkpoint_path:
+        import re
+        match = re.search(r"fold(\d+)", checkpoint_path)
+        if match:
+            fold_idx = int(match.group(1))
+            
+    if hasattr(cfg, "HETERO_CV_BACKBONES") and cfg.HETERO_CV_BACKBONES:
+        backbone_name = cfg.HETERO_CV_BACKBONES[fold_idx % len(cfg.HETERO_CV_BACKBONES)]
+    else:
+        backbone_name = getattr(cfg, "IMAGE_BACKBONE", "efficientnetv2_s")
+        
+    print(f"[ONNX Export] Using backbone '{backbone_name}' for fold {fold_idx}")
     
     model = MultiModalMeshQCModelV7(
         backbone_name=backbone_name,
@@ -62,6 +75,13 @@ def export_to_onnx(
         d_model=getattr(cfg, "TRANSFORMER_EMBED_DIM", 256),
         mesh_dim=mesh_dim,
         num_classes=10,
+        use_soft_hierarchy=getattr(cfg, "USE_HIERARCHICAL_HEAD", False),
+        use_msdo=getattr(cfg, "USE_MULTI_SAMPLE_DROPOUT", False),
+        use_co_attention=getattr(cfg, "USE_CROSS_MODAL_ATTENTION", False),
+        use_flash_attention=getattr(cfg, "USE_FLASH_ATTENTION", False),
+        use_deepseek_mla=getattr(cfg, "USE_DEEPSEEK_MLA", False),
+        use_kimi_latent_memory=getattr(cfg, "USE_KIMI_LATENT_MEMORY", False),
+        use_glm_spatial_aligner=getattr(cfg, "USE_GLM_SPATIAL_ALIGNER", False),
     ).to(device)
 
     if checkpoint_path and os.path.exists(checkpoint_path):

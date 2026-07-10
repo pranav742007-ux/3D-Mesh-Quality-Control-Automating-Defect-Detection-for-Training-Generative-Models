@@ -89,13 +89,13 @@ MESH_HIDDEN_DIMS = [256, 128, 64]  # MLP hidden layers
 MESH_DROPOUT = 0.3
 
 # --- Fusion ---
-FUSION_METHOD = "late_average"  # Options: late_average, late_weighted, concat_mlp
+FUSION_METHOD = "transformer"  # 'late_average', 'concat_mlp', or 'transformer'
 FUSION_IMAGE_WEIGHT = 0.75     # Weight for image branch in late_average
 FUSION_MESH_WEIGHT = 0.25      # Weight for mesh branch
 
 # ──────────────────────────── TRAINING SETTINGS ──────────────────────────────
 BATCH_SIZE = 8
-NUM_EPOCHS = 30
+NUM_EPOCHS = 20
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 GRADIENT_CLIP = 1.0
@@ -142,7 +142,7 @@ AUTO_DETECT_GRID = True     # Auto-detect PNG grid layout (vs fixed 3x2)
 # Keys are epoch thresholds: "at epoch X, switch to this size".
 # Schedule goes SMALL → LARGE (the standard progressive resize pattern).
 PROGRESSIVE_RESIZE = True
-PROGRESSIVE_SCHEDULE = {0: 128, 5: 192, 12: 224}  # epoch -> image_size
+PROGRESSIVE_SCHEDULE = {0: 192, 6: 224}  # epoch -> image_size
 
 # ──────────────────────────── MEMORY OPTIMIZATIONS (Limitation #5) ────────
 # Gradient checkpointing: trade compute for memory
@@ -150,7 +150,7 @@ USE_GRADIENT_CHECKPOINTING = False  # Enable if OOM on T4
 # Sequential view processing: process one view at a time (saves VRAM, slower)
 SEQUENTIAL_VIEW_PROCESSING = False  # Enable if 6 simultaneous views OOM
 # View subsampling: use fewer views during training (all 6 at inference)
-VIEWS_TRAIN_SUBSAMPLE = None  # e.g., 4 means randomly pick 4 of 6 views per item
+VIEWS_TRAIN_SUBSAMPLE = 4  # e.g., 4 means randomly pick 4 of 6 views per item
 GRADIENT_ACCUM_STEPS = 4     # Effective batch = BATCH_SIZE * this = 32
 # Mixed precision
 MIXED_PRECISION = True        # FP16 training (AMP)
@@ -165,7 +165,7 @@ TTA_FAST_ROTATIONS = [0]          # Faster: no rotations
 # --- Threshold Optimization ---
 OPTIMIZE_THRESHOLDS = True
 THRESHOLD_SEARCH_RANGE = (0.05, 0.95)
-THRESHOLD_SEARCH_STEPS = 100
+THRESHOLD_SEARCH_STEPS = 150
 DEFAULT_THRESHOLD = 0.5
 
 
@@ -301,7 +301,7 @@ SAVE_LAST_MODEL = True
 WANDB_PROJECT = None          # Set to string to enable W&B logging
 
 # ──────────────────────────── v4.1 RISK-CONTROLLED ARCHITECTURE CONFIGS ──────
-USE_CROSS_VIEW_TRANSFORMER = False  # Enable Cross-View Transformer Fusion
+USE_CROSS_VIEW_TRANSFORMER = True  # Enable Cross-View Transformer Fusion
 TRANSFORMER_EMBED_DIM = 256         # d_model=256 (overfitting control)
 TRANSFORMER_DEPTH = 2
 TRANSFORMER_HEADS = 4
@@ -316,10 +316,12 @@ USE_QUALITY_QUERY = True
 USE_SPATIAL_VIEW_TOKENS = False     # Enable 2x2 Spatial View Tokens Lite (24 tokens)
 SPATIAL_TOKEN_GRID = 2
 
-USE_HIERARCHICAL_HEAD = False       # Enable Soft Zero-Initialized Hierarchy (alpha=0, beta=0)
+USE_HIERARCHICAL_HEAD = True       # Enable Soft Zero-Initialized Hierarchy (alpha=0, beta=0)
 USE_EXPERT_HEADS = False            # Enable Defect Domain Experts
 
-USE_MULTI_SAMPLE_DROPOUT = False    # Enable Multi-Sample Dropout (MSDO)
+USE_MULTI_SAMPLE_DROPOUT = True    # Enable Multi-Sample Dropout (MSDO)
+USE_OHEM = True                     # Enable Online Hard Example Mining (OHEM)
+USE_CLEAN_SHIELD = True             # Enable Clean Mesh Shield Loss
 USE_GRADIENT_NORMALS = False        # Enable 6-channel Sobel pseudo-normals
 USE_CROSS_MODAL_ATTENTION = False   # Enable Bi-Directional Image <-> Geometry Attention
 IMAGE_IN_CHANNELS = 6 if USE_GRADIENT_NORMALS else 3
@@ -336,6 +338,15 @@ USE_KIMI_DPO_LOSS = False           # Enable Kimi Quality Preference DPO Loss
 USE_OMNI_ROUTE = False              # Enable OmniRoute Dynamic Path Dispatcher
 USE_EARLY_EXIT = True               # Enable ConfidenceScheduledRouter early-exit (Phase A/B/C agentic flow)
 EARLY_EXIT_THRESHOLD = 0.95         # Early exit confidence threshold
+
+# Heterogeneous CV Backbones (One per fold)
+HETERO_CV_BACKBONES = [
+    "convnext_tiny",      # Fold 0: Excellent for local textures
+    "efficientnetv2_s",   # Fold 1: Best speed/accuracy, global structure
+    "resnet50",           # Fold 2: Strong edge/contour detection
+    "efficientnet_b3",    # Fold 3: Higher capacity, fine details
+    "convnext_tiny",      # Fold 4: Duplicate best performer for weight
+]
 
 # ──────────────────────────── PERFORMANCE CONFIGS ──────────────────────────────
 USE_NUMBA = True                         # Enable Numba JIT Compilation for heavy math

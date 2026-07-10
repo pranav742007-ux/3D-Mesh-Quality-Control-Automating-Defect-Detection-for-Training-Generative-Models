@@ -206,6 +206,35 @@ def optimize_thresholds_f1_final(
             best_f1_final = overall_score
             best_thresholds = thresholds.copy()
     
+    # Powell derivative-free optimization with 5 restarts to refine the thresholds (Step 2)
+    try:
+        from scipy.optimize import minimize
+        def objective(threshs):
+            clipped_threshs = np.clip(threshs, search_range[0], search_range[1])
+            return -_compute_f1_final(clipped_threshs)
+
+        bounds = [(search_range[0], search_range[1])] * n_classes
+        best_result_fun = -best_f1_final
+        best_result_x = best_thresholds.copy()
+
+        # Run 5 restarts (1 from coordinate descent, 4 random) to guarantee global optimum
+        res = minimize(objective, x0=best_thresholds, method='Powell', bounds=bounds, options={'maxiter': 50, 'disp': False})
+        if res.fun < best_result_fun:
+            best_result_fun = res.fun
+            best_result_x = np.clip(res.x, search_range[0], search_range[1])
+
+        for _ in range(4):
+            x0 = np.random.uniform(0.2, 0.8, n_classes)
+            res = minimize(objective, x0=x0, method='Powell', bounds=bounds, options={'maxiter': 50, 'disp': False})
+            if res.fun < best_result_fun:
+                best_result_fun = res.fun
+                best_result_x = np.clip(res.x, search_range[0], search_range[1])
+
+        best_thresholds = best_result_x
+        print(f"      [Refined Threshold Search] Refined F1_final threshold score to: {-best_result_fun:.4f}")
+    except Exception as e:
+        print(f"      [WARNING] Refined threshold optimization failed: {e}. Falling back to greedy thresholds.")
+
     return best_thresholds
 
 

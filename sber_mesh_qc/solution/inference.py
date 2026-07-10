@@ -62,6 +62,11 @@ def build_model_for_inference(fold: int, input_mesh_dim: Optional[int] = None):
         effective_mesh_dim = MESH_FEATURE_DIM_EXTENDED if USE_EXTENDED_FEATURES else MESH_FEATURE_DIM
 
     import config
+    # Override backbones dynamically based on fold (Heterogeneous CV - Step 1)
+    if hasattr(config, "HETERO_CV_BACKBONES") and config.HETERO_CV_BACKBONES:
+        config.IMAGE_BACKBONE = config.HETERO_CV_BACKBONES[fold % len(config.HETERO_CV_BACKBONES)]
+        print(f"  [HETERO CV Inference] Fold {fold} using backbone: {config.IMAGE_BACKBONE}")
+
     from models import build_model_from_config
     return build_model_from_config(cfg=config, effective_mesh_dim=effective_mesh_dim)
 
@@ -262,11 +267,40 @@ def ensemble_inference(
 
         print(f"  Loading fold {fold} model from {checkpoint_path}")
 
-        input_mesh_dim = mesh_features.shape[1] if mesh_features is not None and hasattr(mesh_features, "shape") and len(mesh_features.shape) > 1 else None
+        ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+        
+        # Scale test features dynamically for this fold using model checkpoint statistics (H6)
+        fold_mesh_features = mesh_features.copy() if mesh_features is not None else None
+        if fold_mesh_features is not None and isinstance(ckpt, dict) and "scaler_mean" in ckpt and ckpt["scaler_mean"] is not None:
+            mean = ckpt["scaler_mean"]
+            std = ckpt["scaler_std"]
+            # z-score standardise
+            fold_mesh_features = np.where(np.isnan(fold_mesh_features) | np.isinf(fold_mesh_features), mean, fold_mesh_features)
+            fold_mesh_features = (fold_mesh_features - mean) / (std + 1e-7)
+
+        # Create test_loader locally for this fold with the standardized features
+        fold_test_dataset = MeshQualityDataset(
+            item_ids=test_ids,
+            labels_df=None,
+            image_dir=image_dir,
+            mesh_features=fold_mesh_features,
+            point_clouds=point_clouds,
+            image_size=IMAGE_SIZE,
+            view_grid=view_grid,
+            augment=False,
+            views_subsample=None,
+        )
+        fold_test_loader = DataLoader(
+            fold_test_dataset, batch_size=BATCH_SIZE, shuffle=False,
+            num_workers=num_workers, pin_memory=PIN_MEMORY,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=2 if num_workers > 0 else None,
+            collate_fn=safe_collate,
+        )
+
+        input_mesh_dim = fold_mesh_features.shape[1] if fold_mesh_features is not None and hasattr(fold_mesh_features, "shape") and len(fold_mesh_features.shape) > 1 else None
         model = build_model_for_inference(fold, input_mesh_dim=input_mesh_dim).to(DEVICE)
 
-        ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
-        # Handle both formats: full checkpoint dict (with model_state_dict key) or plain state_dict
         state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
         state_dict = clean_state_dict_keys(state_dict, model)
         try:
@@ -283,7 +317,7 @@ def ensemble_inference(
             if unexpected:
                 print(f"    [WARNING] Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
-        fold_proba = inference_with_tta(model, test_loader, DEVICE, USE_TTA, temperature=temperature, effort=effort)
+        fold_proba = inference_with_tta(model, fold_test_loader, DEVICE, USE_TTA, temperature=temperature, effort=effort)
         fold_proba_list.append(fold_proba)
 
         # Free memory

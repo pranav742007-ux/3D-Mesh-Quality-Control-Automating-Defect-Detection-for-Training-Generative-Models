@@ -504,10 +504,11 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="full",
-        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images", "pseudo_label", "pseudo-label"],
+        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images", "pseudo_label", "pseudo-label", "distill"],
         help="Pipeline mode: full (everything), download, features, train, infer, "
              "all_no_download (features+train+infer), preprocess_images (offline cropping), "
-             "pseudo_label (self-training test pseudo-label generation)",
+             "pseudo_label (self-training test pseudo-label generation), "
+             "distill (train fast student model from soft teacher targets)",
     )
     parser.add_argument("--base-dir", "--base_dir", type=str, default=None,
                         help="Project base directory (auto-detected if not set)")
@@ -795,6 +796,34 @@ def main():
                 data_dir, base_dir, num_points=config.POINTNET_NUM_POINTS
             )
         step_pseudo_label(test_features, data_dir, checkpoint_dir, log_dir, test_pcs)
+
+    elif args.mode == "distill":
+        train_csv = os.path.join(data_dir, "train.csv")
+        train_df = pd.read_csv(train_csv)
+        train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
+        if "Unnamed: 0" in train_df.columns:
+            train_df = train_df.drop(columns=["Unnamed: 0"])
+            
+        train_img_dir = os.path.join(data_dir, "train")
+        if not os.path.isdir(train_img_dir):
+            for candidate in [data_dir, os.path.join(data_dir, "train_images")]:
+                if os.path.isdir(candidate) and any(f.endswith(".png") for f in os.listdir(candidate)[:5]):
+                    train_img_dir = candidate
+                    break
+                    
+        if train_features is None:
+            train_features, _ = step_extract_features(
+                data_dir, base_dir, extended=config.USE_EXTENDED_FEATURES
+            )
+            
+        from distill import distill_student
+        distill_student(
+            train_df=train_df,
+            image_dir=train_img_dir,
+            mesh_features=train_features,
+            checkpoint_dir=checkpoint_dir,
+            log_dir=log_dir,
+        )
 
     print("\n" + "=" * 60)
     print("  PIPELINE COMPLETE")

@@ -549,6 +549,15 @@ def train_one_fold(
             min_lr=MIN_LR,
         )
 
+    # Initialize SWA (Grandmaster Phase 3)
+    swa_model = None
+    swa_scheduler = None
+    if getattr(_cfg, "USE_SWA", False):
+        from torch.optim.swa_utils import AveragedModel, SWALR
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=getattr(_cfg, "SWA_LR", 5e-5), swa_start_epoch=getattr(_cfg, "SWA_START_EPOCH", 15))
+        print(f"  [SWA] Initialized SWA AveragedModel & SWALR scheduler.")
+
     # ── Mixed precision ────────────────────────────────────────────────────
     device_type = "cuda" if "cuda" in DEVICE else "cpu"
     # v2.1.1 FIX: GradScaler device_type param only exists in PyTorch 2.0+
@@ -730,7 +739,13 @@ def train_one_fold(
                 )
 
         if not use_onecycle:
-            scheduler.step()
+            if swa_scheduler is not None and epoch >= getattr(_cfg, "SWA_START_EPOCH", 15):
+                swa_scheduler.step()
+            else:
+                scheduler.step()
+
+        if getattr(_cfg, "USE_SWA", False) and swa_model is not None and epoch >= getattr(_cfg, "SWA_START_EPOCH", 15):
+            swa_model.update_parameters(model)
 
         # ── Validate (with EMA if enabled) ────────────────────────────────
         if ema is not None:
@@ -829,6 +844,26 @@ def train_one_fold(
             print(f"  [STOP] Early stopping at epoch {epoch+1} (best: epoch {best_epoch})")
             break
 
+    # Apply SWA weights for final evaluation and checkpoint saving (Grandmaster Phase 3)
+    if getattr(_cfg, "USE_SWA", False) and swa_model is not None:
+        try:
+            print("  Applying SWA weights for final evaluation and checkpoint saving...")
+            swa_state = swa_model.state_dict()
+            # Handle PyTorch SWA AveragedModel module wrapping
+            clean_swa = {k.replace('module.', ''): v for k, v in swa_state.items() if k.startswith('module.')}
+            if not clean_swa:
+                clean_swa = {k: v for k, v in swa_state.items()}
+            model.load_state_dict(clean_swa, strict=False)
+            
+            # Re-save best checkpoint using SWA weights
+            if os.path.exists(best_path):
+                best_ckpt = torch.load(best_path, map_location="cpu", weights_only=False)
+                best_ckpt["model_state_dict"] = model.state_dict()
+                torch.save(best_ckpt, best_path)
+                print("  [SWA] Re-saved best checkpoint with SWA weights.")
+        except Exception as e:
+            print(f"  [WARNING] SWA weight swap failed: {e}")
+
     # ── Threshold optimization on validation set ───────────────────────────
     print(f"\n  Optimizing thresholds on fold {fold+1} validation set...")
 
@@ -903,6 +938,8 @@ def train_one_fold(
         "final_metrics": {k: float(v) for k, v in final_metrics.items()},
         "history": {k: [float(v) for v in vs] for k, vs in history.items()},
         "best_model_path": best_path,
+        "val_idx": val_idx if isinstance(val_idx, list) else val_idx.tolist(),
+        "val_proba": val_proba.tolist(),
     }
 
     result_path = os.path.join(log_dir, f"fold_{fold}_result.json")
@@ -1030,6 +1067,8 @@ def train_full_cv(
     stratify_labels = train_df["quality"].values
 
     all_fold_results = []
+    # Collect out-of-fold validation predictions for knowledge distillation (Grandmaster Phase 2)
+    oof_predictions = np.zeros((len(train_df), len(DEFECT_COLS)))
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(item_ids, stratify_labels)):
         # OVERRIDE BACKBONE FOR THIS FOLD (Heterogeneous CV - Step 1)
@@ -1064,6 +1103,12 @@ def train_full_cv(
 
         all_fold_results.append(result)
 
+        # Collect out-of-fold validation predictions for distillation (Grandmaster Phase 2)
+        val_idx = result.get("val_idx")
+        val_proba = result.get("val_proba")
+        if val_idx is not None and val_proba is not None:
+            oof_predictions[val_idx] = np.array(val_proba)
+
     # ── Aggregate results ──────────────────────────────────────────────────
     avg_metrics = {}
     for key in ["f1_quality", "f1_defects", "f1_final"]:
@@ -1095,5 +1140,10 @@ def train_full_cv(
     cv_path = os.path.join(log_dir, "cv_results.json")
     with open(cv_path, "w") as f:
         json.dump(cv_result, f, indent=2, default=str)
+
+    # Save out-of-fold predictions for Knowledge Distillation (Grandmaster Phase 2)
+    soft_targets_path = os.path.join(log_dir, "train_soft_targets.npy")
+    np.save(soft_targets_path, oof_predictions)
+    print(f"  [OK] Saved ensembled soft targets to: {soft_targets_path}")
 
     return cv_result

@@ -333,6 +333,18 @@ def ensemble_inference(
     print(f"\n  Ensemble of {len(fold_proba_list)} folds")
     print(f"  Prediction shape: {ensemble_proba.shape}")
 
+    # ── GEOMETRIC SAFETY NET (Grandmaster Phase 1) ────────────────────────
+    # Use unsupervised geometry to prevent False Positives on clean meshes.
+    # If the model isn't confident about any defect (max prob < 0.35), it is likely clean.
+    # We apply a compression factor to pull these uncertain probabilities down below threshold.
+    if mesh_features is not None:
+        max_probs = ensemble_proba.max(axis=1)
+        uncertain_mask = max_probs < 0.35
+        if uncertain_mask.any():
+            # Broadcast scaling factor safely using np.expand_dims for numpy array
+            scale_factor = np.expand_dims(max_probs[uncertain_mask] / 0.35, axis=1)
+            ensemble_proba[uncertain_mask] = ensemble_proba[uncertain_mask] * scale_factor
+
     # ── Apply thresholds ───────────────────────────────────────────────────
     predictions = (ensemble_proba >= thresholds).astype(int)
 

@@ -343,6 +343,65 @@ def ensemble_inference(
     proba_df = pd.DataFrame(ensemble_proba, columns=DEFECT_COLS)
     proba_df.insert(0, "item_id", test_ids)
 
+    # ── Explainability & OOD (Phase 8 and Phase 3 Integration) ─────────────
+    try:
+        from explainability import PredictionExplanation, OODDetector
+        from mesh_validity import MeshValidityAnalyzer
+        
+        print("\n  [Explainability] Generating prediction explanations & OOD checks...")
+        explanations = []
+        
+        # Load OOD detector from CV results (Phase 8 Integration)
+        ood_detector = OODDetector()
+        if cv_results_path is not None and os.path.isfile(cv_results_path):
+            try:
+                with open(cv_results_path, "r") as f_cv:
+                    cv_dict = json.load(f_cv)
+                params = cv_dict.get("ood_detector_params")
+                if params is not None:
+                    ood_detector.load_from_dict(params)
+                    print("  [OOD Detector] Loaded fitted parameters from training distribution.")
+            except Exception as ood_load_err:
+                print(f"  [OOD Detector WARNING] Failed to load training OOD parameters: {ood_load_err}")
+        
+        for idx, item_id in enumerate(test_ids):
+            # Try to load geometry data from test dir if present
+            npz_name = os.path.basename(str(item_id))
+            npz_path = os.path.normpath(os.path.join(test_image_dir, f"{npz_name}.npz"))
+            
+            validity_report = {}
+            if os.path.isfile(npz_path):
+                try:
+                    data = np.load(npz_path, allow_pickle=False)
+                    v_data = data["vertices"]
+                    f_data = data["faces"]
+                    validity_report = MeshValidityAnalyzer.analyze_mesh(v_data, f_data)
+                except Exception:
+                    pass
+            
+            ood_score = 0.0
+            if mesh_features is not None:
+                ood_score = ood_detector.compute_ood_score(mesh_features[idx])
+                
+            exp = PredictionExplanation.explain_prediction(
+                item_id=str(item_id),
+                defect_probs=ensemble_proba[idx],
+                thresholds=thresholds,
+                validity_report=validity_report,
+                ood_score=ood_score,
+                class_names=DEFECT_COLS
+            )
+            explanations.append(exp)
+            
+        exp_dir = getattr(config, "LOG_DIR", "logs")
+        os.makedirs(exp_dir, exist_ok=True)
+        exp_path = os.path.join(exp_dir, "submission_explanations.json")
+        with open(exp_path, "w") as f_exp:
+            json.dump(explanations, f_exp, indent=2)
+        print(f"  [Explainability OK] Explanations saved to: {exp_path}")
+    except Exception as exp_err:
+        print(f"  [Explainability WARNING] Failed to generate explanations: {exp_err}")
+
     print(f"\n  Prediction statistics:")
     print(f"    Total samples: {len(submission)}")
     print(f"    Good (quality=1): {quality.sum()} ({quality.mean()*100:.1f}%)")

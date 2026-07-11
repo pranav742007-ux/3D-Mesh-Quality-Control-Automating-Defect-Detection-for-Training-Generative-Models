@@ -170,7 +170,10 @@ for candidate in DATA_CANDIDATES:
 if DATA_DIR is None:
     print("[INFO] Competition data not found in /kaggle/input/")
     print("       Will attempt to download it in the next cell.")
-    DATA_DIR = "/kaggle/working/data"
+    # WARNING: Do NOT use /kaggle/working/data! Kaggle has a strict 20GB write quota
+    # on /kaggle/working/ which will crash during extraction of the 30GB dataset.
+    # We use /kaggle/tmp/ which has access to the full 73GB container limit.
+    DATA_DIR = "/kaggle/tmp/data"
 else:
     print(f"  Competition data found at: {DATA_DIR}")
 

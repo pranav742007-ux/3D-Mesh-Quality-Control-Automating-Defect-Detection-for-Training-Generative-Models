@@ -202,18 +202,18 @@ def run_smoke_tests():
 
     # ── Test 11: 100D Vectorized SHTD, Betti, QEM & Physics Invariants Test ───
     print("\n[Test 11/23] 100D SHTD, Betti, QEM & Physics Invariants Verification...")
-    from mesh_features import compute_spherical_harmonics_descriptors, compute_topological_betti_numbers, compute_qem_decimation_stability, compute_physics_stability_metric
+    from mesh_features import compute_spherical_harmonics_descriptors, compute_topological_invariants, compute_qem_decimation_stability, compute_physics_stability_metric
     dummy_verts = np.random.randn(50, 3)
     dummy_faces = np.array([[0, 1, 2], [1, 2, 3]])
     shtd_vec = compute_spherical_harmonics_descriptors(dummy_verts)
-    betti_vec = compute_topological_betti_numbers(dummy_verts, dummy_faces)
+    betti_vec = compute_topological_invariants(dummy_verts, dummy_faces)
     qem_val = compute_qem_decimation_stability(dummy_verts, dummy_faces)
     phys_dict = compute_physics_stability_metric(dummy_verts, dummy_faces)
     assert shtd_vec.shape == (25,)
-    assert betti_vec.shape == (3,)
+    assert betti_vec.shape == (6,)
     assert qem_val >= 0.0
     assert "tipping_angle_deg" in phys_dict
-    print(f"  [OK] 100D Topology Invariants verified: SHTD={shtd_vec.shape}, Betti={betti_vec.shape}, QEM={qem_val:.2f}, Physics={phys_dict['tipping_angle_deg']:.1f}°")
+    print(f"  [OK] 100D Topology Invariants verified: SHTD={shtd_vec.shape}, Topo={betti_vec.shape}, QEM={qem_val:.2f}, Physics={phys_dict['tipping_angle_deg']:.1f}°")
 
     # ── Test 12: Binary Evidential Head & Aux Reconstruction Check ────────────
     print("\n[Test 12/23] Binary Evidential Beta Head & Aux Recon Verification...")
@@ -244,7 +244,7 @@ def run_smoke_tests():
     raw_v = np.random.randn(40, 3)
     raw_f = np.array([[0, 1, 2], [1, 2, 3]])
     rast_tensor = DirectMeshRasterizer.rasterize_views(raw_v, raw_f, img_size=224)
-    assert rast_tensor.shape == (6, 6, 224, 224)
+    assert rast_tensor.shape == (6, 5, 224, 224)
     print(f"  [OK] Direct CPU Mesh Rasterizer verified: shape={rast_tensor.shape}")
 
     # ── Test 14: Curvature-Weighted FPS Point Cloud Sampling Test ─────────────

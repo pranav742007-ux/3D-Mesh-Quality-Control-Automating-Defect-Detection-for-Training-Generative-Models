@@ -55,7 +55,7 @@ except ImportError:
     class BaseModel: pass
     class Field:
         def __init__(self, **kwargs): pass
-    class File: pass
+    def File(*args, **kwargs): pass
     class UploadFile: pass
 
 try:
@@ -348,8 +348,8 @@ def parse_obj_bytes(obj_bytes: bytes) -> Tuple[np.ndarray, np.ndarray]:
 
 app = FastAPI(
     title="3D Mesh Quality Control — Universal Deployment Engine",
-    description="Sub-50ms Multi-Modal 3D Mesh Quality Inspection (v7.2)",
-    version="7.2.0",
+    description="Sub-50ms Multi-Modal 3D Mesh Quality Inspection (v7.3)",
+    version="7.3.0",
 )
 
 GLOBAL_ENGINE: Optional[UniversalInferenceEngine] = None
@@ -394,7 +394,7 @@ def health_check() -> Dict:
         "status": "HEALTHY" if GLOBAL_ENGINE is not None else "DEGRADED",
         "model_loaded": GLOBAL_ENGINE is not None,
         "backend": GLOBAL_ENGINE.backend if GLOBAL_ENGINE else "none",
-        "version": "7.2.0",
+        "version": "7.3.0",
     }
 
 
@@ -799,7 +799,7 @@ Examples:
     )
 
     parser.add_argument("--mode", type=str, default="server",
-                        choices=["server", "cli", "camera", "batch"],
+                        choices=["server", "cli", "camera", "batch", "benchmark"],
                         help="Deployment mode (default: server)")
     parser.add_argument("--backend", type=str, default="pytorch",
                         choices=["pytorch", "onnx"],
@@ -847,6 +847,74 @@ Examples:
     return parser
 
 
+def run_benchmark_mode(args):
+    print(f"\n{'=' * 60}")
+    print(f"  DEPLOYMENT BENCHMARK SUITE")
+    print(f"{'=' * 60}")
+    
+    # 1. Create a synthetic mesh
+    v = np.array([
+        [-0.5, -0.5, -0.5],
+        [ 0.5, -0.5, -0.5],
+        [ 0.5,  0.5, -0.5],
+        [-0.5,  0.5, -0.5],
+        [-0.5, -0.5,  0.5],
+        [ 0.5, -0.5,  0.5],
+        [ 0.5,  0.5,  0.5],
+        [-0.5,  0.5,  0.5]
+    ], dtype=np.float32)
+    f = np.array([
+        [0, 1, 2], [0, 2, 3],
+        [4, 5, 6], [4, 6, 7],
+        [0, 1, 5], [0, 5, 4],
+        [1, 2, 6], [1, 6, 5],
+        [2, 3, 7], [2, 7, 6],
+        [3, 0, 4], [3, 4, 7]
+    ], dtype=np.int32)
+    
+    # Render synthetic views using DirectMeshRasterizer
+    from image_processing import DirectMeshRasterizer
+    views_tensor = DirectMeshRasterizer.rasterize_views(v, f, img_size=224).unsqueeze(0)
+    views_tensor = torch.cat([views_tensor, torch.zeros((1, 6, 3, 224, 224))], dim=2) # 8 channels
+    mesh_feat = torch.zeros((1, 103), dtype=torch.float32)
+    
+    print("  [1/2] Loading PyTorch inference engine...")
+    try:
+        from models import MultiViewImageModel, MeshFeatureMLP, FusedEnsembleModel
+        img_model = MultiViewImageModel(in_channels=8, embed_dim=1280)
+        mesh_model = MeshFeatureMLP(input_dim=103)
+        model = FusedEnsembleModel(image_model=img_model, mesh_model=mesh_model, fusion_method="gated")
+        model.eval()
+        
+        # Warmup
+        for _ in range(5):
+            with torch.no_grad():
+                _ = model(views_tensor, mesh_feat)
+                
+        # Benchmark runs
+        latencies = []
+        for _ in range(50):
+            start = time.perf_counter()
+            with torch.no_grad():
+                _ = model(views_tensor, mesh_feat)
+            latencies.append((time.perf_counter() - start) * 1000.0)
+            
+        avg_lat = np.mean(latencies)
+        p50 = np.percentile(latencies, 50)
+        p95 = np.percentile(latencies, 95)
+        fps = 1000.0 / avg_lat
+        
+        print("  [RESULT] PyTorch Backend:")
+        print(f"    Avg Latency:    {avg_lat:.2f} ms")
+        print(f"    Median (p50):   {p50:.2f} ms")
+        print(f"    p95 Latency:    {p95:.2f} ms")
+        print(f"    Throughput:     {fps:.1f} FPS")
+    except Exception as e:
+        print(f"  [ERROR] PyTorch benchmark failed: {e}")
+        
+    print(f"\n{'=' * 60}\n")
+
+
 if __name__ == "__main__":
     parser = build_parser()
     args = parser.parse_args()
@@ -880,3 +948,7 @@ if __name__ == "__main__":
             parser.print_help()
             sys.exit(1)
         run_batch_mode(args)
+
+    elif args.mode == "benchmark":
+        # ── Benchmarking Mode ──
+        run_benchmark_mode(args)

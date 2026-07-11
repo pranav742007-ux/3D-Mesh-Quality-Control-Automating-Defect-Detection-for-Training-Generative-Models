@@ -37,20 +37,20 @@ def _sanitize_item_id(item_id) -> str:
 
 class DirectMeshRasterizer:
     """
-    Direct CPU Orthographic Fast Mesh Rasterizer (v6.5 Ground Reality).
-    Generates 6-view 6-channel RGB + Pseudo-Normal tensors (6, 6, 224, 224) directly from raw vertices/faces
+    Direct CPU Orthographic Fast Mesh Rasterizer (v7.3).
+    Generates 6-view 5-channel Depth + true normals + mask (6, 5, 224, 224) directly from raw vertices/faces
     in <10ms without requiring external Blender or OpenGL offscreen display windows.
     """
     @staticmethod
     def rasterize_views(vertices: np.ndarray, faces: np.ndarray = None, img_size: int = 224) -> torch.Tensor:
         if vertices is None or len(vertices) == 0:
-            return torch.zeros((6, 6, img_size, img_size), dtype=torch.float32)
+            return torch.zeros((6, 5, img_size, img_size), dtype=torch.float32)
 
         centered = vertices - vertices.mean(axis=0)
         max_bound = np.max(np.abs(centered)) + 1e-7
         norm_verts = centered / max_bound
 
-        # P1-11 FIX: Rasterize face centers and edge midpoints to fill contiguous 2D surface pixels
+        # Compute vertex normals
         if faces is not None and len(faces) > 0 and len(vertices) > 0:
             N = len(norm_verts)
             valid_f = faces[(faces[:, 0] < N) & (faces[:, 1] < N) & (faces[:, 2] < N)]
@@ -58,15 +58,38 @@ class DirectMeshRasterizer:
                 v0 = norm_verts[valid_f[:, 0]]
                 v1 = norm_verts[valid_f[:, 1]]
                 v2 = norm_verts[valid_f[:, 2]]
-                center = (v0 + v1 + v2) / 3.0
-                m01 = (v0 + v1) / 2.0
-                m12 = (v1 + v2) / 2.0
-                m20 = (v2 + v0) / 2.0
-                dense_verts = np.concatenate([norm_verts, center, m01, m12, m20], axis=0)
+                cross = np.cross(v1 - v0, v2 - v0)
+                face_normals = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-10)
+                
+                # Accumulate vertex normals
+                vert_normals = np.zeros_like(norm_verts)
+                for i in range(3):
+                    np.add.at(vert_normals, valid_f[:, i], face_normals)
+                vert_norms = np.linalg.norm(vert_normals, axis=1, keepdims=True) + 1e-10
+                vert_normals = vert_normals / vert_norms
+                
+                # Interpolate to face centers and edge midpoints
+                n0 = vert_normals[valid_f[:, 0]]
+                n1 = vert_normals[valid_f[:, 1]]
+                n2 = vert_normals[valid_f[:, 2]]
+                center_n = (n0 + n1 + n2) / 3.0
+                m01_n = (n0 + n1) / 2.0
+                m12_n = (n1 + n2) / 2.0
+                m20_n = (n2 + n0) / 2.0
+                
+                center_n = center_n / (np.linalg.norm(center_n, axis=1, keepdims=True) + 1e-10)
+                m01_n = m01_n / (np.linalg.norm(m01_n, axis=1, keepdims=True) + 1e-10)
+                m12_n = m12_n / (np.linalg.norm(m12_n, axis=1, keepdims=True) + 1e-10)
+                m20_n = m20_n / (np.linalg.norm(m20_n, axis=1, keepdims=True) + 1e-10)
+                
+                dense_verts = np.concatenate([norm_verts, (v0 + v1 + v2) / 3.0, (v0 + v1) / 2.0, (v1 + v2) / 2.0, (v2 + v0) / 2.0], axis=0)
+                dense_normals = np.concatenate([vert_normals, center_n, m01_n, m12_n, m20_n], axis=0)
             else:
                 dense_verts = norm_verts
+                dense_normals = np.zeros_like(norm_verts)
         else:
             dense_verts = norm_verts
+            dense_normals = np.zeros_like(norm_verts)
 
         directions = [
             (0, 1, 2),   # +Z (Front): u=X, v=Y, depth=+Z
@@ -83,6 +106,9 @@ class DirectMeshRasterizer:
         views_tensor = []
         for i, (u_axis, v_axis, depth_axis) in enumerate(directions):
             depth_map = np.zeros((img_size, img_size), dtype=np.float32)
+            normal_map = np.zeros((img_size, img_size, 3), dtype=np.float32)
+            mask = np.zeros((img_size, img_size), dtype=np.float32)
+            
             u_vals = dense_verts[:, u_axis]
             v_vals = dense_verts[:, v_axis]
             if flip_u[i]:
@@ -100,27 +126,35 @@ class DirectMeshRasterizer:
                 z_vals = -z_vals
             z_vals = (z_vals + 1.0) * 0.5
 
-            # Vectorized scatter reduction (10-50x faster than np.maximum.at)
-            flat_coords = v_coords * img_size + u_coords
-            order = np.argsort(flat_coords)
-            flat_sorted = flat_coords[order]
+            # Project normals to camera frame
+            nu = dense_normals[:, u_axis]
+            if flip_u[i]:
+                nu = -nu
+            nv = dense_normals[:, v_axis]
+            if flip_v[i]:
+                nv = -nv
+            nz = dense_normals[:, depth_axis]
+            if flip_z[i]:
+                nz = -nz
+                
+            camera_normals = np.stack([nu, nv, nz], axis=1)
+
+            # Sort by depth to implement Z-buffer writing canonically
+            order = np.argsort(z_vals)
+            u_sorted = u_coords[order]
+            v_sorted = v_coords[order]
             z_sorted = z_vals[order]
-            unique_idx, first_idx = np.unique(flat_sorted, return_index=True)
-            max_z = np.maximum.reduceat(z_sorted, first_idx)
-            depth_map.flat[unique_idx] = max_z
+            normals_sorted = camera_normals[order]
 
-            grad_x = np.gradient(depth_map, axis=1).astype(np.float32)
-            grad_y = np.gradient(depth_map, axis=0).astype(np.float32)
-            norm_z = np.sqrt(np.maximum(0.0, 1.0 - grad_x**2 - grad_y**2)).astype(np.float32)
+            depth_map[v_sorted, u_sorted] = z_sorted
+            normal_map[v_sorted, u_sorted] = normals_sorted
+            mask[v_sorted, u_sorted] = 1.0
 
-            six_chan = np.empty((6, img_size, img_size), dtype=np.float32)
-            six_chan[0] = depth_map
-            six_chan[1] = depth_map
-            six_chan[2] = depth_map
-            six_chan[3] = grad_x
-            six_chan[4] = grad_y
-            six_chan[5] = norm_z
-            views_tensor.append(torch.from_numpy(six_chan))
+            five_chan = np.empty((5, img_size, img_size), dtype=np.float32)
+            five_chan[0] = depth_map
+            five_chan[1:4] = normal_map.transpose(2, 0, 1)
+            five_chan[4] = mask
+            views_tensor.append(torch.from_numpy(five_chan))
 
         return torch.stack(views_tensor, dim=0)
 
@@ -420,6 +454,9 @@ class MeshQualityDataset(Dataset):
             indices = sorted(indices)
             views = [views[i] for i in indices]
 
+        # Track indices for geometry rendering alignment
+        indices_list = list(indices) if 'indices' in locals() else list(range(len(views)))
+
         # Apply augmentation to each view (works on PIL images and tensors)
         if self.augment:
             views = self._augment_views(views)
@@ -437,6 +474,24 @@ class MeshQualityDataset(Dataset):
 
         # Stack: (num_views, 3, H, W)
         views_tensor = torch.stack(view_tensors, dim=0)
+
+        # ── Upgraded true geometry channels concatenation (Phase 2) ───────────
+        npz_path = os.path.join(self.image_dir, f"{safe_item_id}.npz")
+        if os.path.isfile(npz_path):
+            try:
+                data = np.load(npz_path, allow_pickle=False)
+                v_data = data["vertices"]
+                f_data = data["faces"]
+                geom_tensor = DirectMeshRasterizer.rasterize_views(v_data, f_data, img_size=self.image_size)
+                # Slice view indices to match
+                geom_tensor = geom_tensor[indices_list]
+            except Exception:
+                geom_tensor = torch.zeros((len(views), 5, self.image_size, self.image_size), dtype=torch.float32)
+        else:
+            geom_tensor = torch.zeros((len(views), 5, self.image_size, self.image_size), dtype=torch.float32)
+
+        # Stack 3ch RGB + 5ch Geometry = 8-channel visual representation
+        views_tensor = torch.cat([views_tensor, geom_tensor], dim=1)
 
         # ── Mesh features ──────────────────────────────────────────────────
         mesh_feat = None

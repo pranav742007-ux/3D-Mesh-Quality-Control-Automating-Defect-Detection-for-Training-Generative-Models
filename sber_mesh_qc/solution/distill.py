@@ -49,7 +49,6 @@ def distill_student(train_df: pd.DataFrame, image_dir: str, mesh_features: np.nd
     
     # 3. Distillation parameters
     T = 2.0  # Softening temperature
-    distill_criterion = nn.KLDivLoss(reduction='batchmean')
     shield_loss_fn = CleanMeshShieldLoss().to(device)
     
     optimizer = torch.optim.AdamW(student.parameters(), lr=1e-4, weight_decay=1e-4)
@@ -82,15 +81,19 @@ def distill_student(train_df: pd.DataFrame, image_dir: str, mesh_features: np.nd
             logits = student(views, mesh_feat)
             
             # Extract corresponding batch soft targets (probabilities) and map to logit space
-            batch_soft_proba = torch.tensor(soft_targets[idx_start:idx_start+cfg.BATCH_SIZE], device=device)
+            # Use views.size(0) for robustness against variable batch sizes
+            batch_soft_proba = torch.tensor(soft_targets[idx_start:idx_start+views.size(0)], device=device)
             # Clip to prevent log(0)
             batch_soft_proba = torch.clamp(batch_soft_proba, 1e-7, 1.0 - 1e-7)
             batch_soft_logits = torch.log(batch_soft_proba / (1.0 - batch_soft_proba))
             
-            # KL Divergence on softened logits
-            student_log_probs = F.log_softmax(logits / T, dim=1)
-            teacher_probs = F.softmax(batch_soft_logits / T, dim=1)
-            loss_kd = distill_criterion(student_log_probs, teacher_probs) * (T * T)
+            # Independent Binary Cross-Entropy with Logits for multi-label distillation
+            # (Fixes the multiclass softmax/KL bug since classes are not mutually exclusive)
+            loss_kd = F.binary_cross_entropy_with_logits(
+                logits / T, 
+                torch.sigmoid(batch_soft_logits / T), 
+                reduction="mean"
+            ) * (T * T)
             
             # Clean mesh shield loss
             loss_shield = shield_loss_fn(logits, labels)

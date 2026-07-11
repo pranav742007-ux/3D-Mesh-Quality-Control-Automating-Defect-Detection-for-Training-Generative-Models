@@ -71,7 +71,7 @@ VIEW_GRID = (3, 2)  # Grid layout: 3 rows x 2 cols
 # Geometric features extracted from .npz (vertices + faces)
 MESH_FEATURE_DIM = 58  # Original hand-crafted features (backward compat)
 MESH_FEATURE_DIM_EXTENDED = (
-    100  # Extended SOTA features (68 basic + 25 SHTD + 3 Betti + 1 QEM + 3 Physics)
+    103  # Extended SOTA features (68 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics)
 )
 USE_EXTENDED_FEATURES = True  # Set True to use 100-dim features
 USE_SPHERICAL_HARMONICS = True  # 25 Cartesian Spherical Harmonics Descriptors (l=0..4)
@@ -349,7 +349,7 @@ SWA_START_EPOCH = 15  # Start averaging with ~5 epochs left
 SWA_LR = 5e-5  # Very low LR for SWA phase
 USE_GRADIENT_NORMALS = False  # Enable 6-channel Sobel pseudo-normals
 USE_CROSS_MODAL_ATTENTION = False  # Enable Bi-Directional Image <-> Geometry Attention
-IMAGE_IN_CHANNELS = 6 if USE_GRADIENT_NORMALS else 3
+IMAGE_IN_CHANNELS = 8  # 3ch RGB + 5ch Upgraded CPU Geometry Renders (Depth, normals, mask)
 ABLATION_LOG_FILE = "logs/ablation_results.csv"
 
 # ──────────────────────────── v7.2 FRONTIER EXPERIMENTAL CONFIGS ───────────────
@@ -404,3 +404,20 @@ def get_class_weights(train_df):
         # Use sqrt of inverse frequency to avoid extreme weights
         weights[col] = np.sqrt(neg_count / max(pos_count, 1))
     return weights
+
+
+def load_yaml_config(yaml_path: str):
+    """
+    Override global config parameters dynamically from a YAML file (Phase 7).
+    """
+    import yaml
+    import os
+    if not os.path.exists(yaml_path):
+        print(f"[Config] YAML file not found: {yaml_path}. Skipping.")
+        return
+    with open(yaml_path, "r") as f:
+        cfg_dict = yaml.safe_load(f)
+    if cfg_dict:
+        for k, v in cfg_dict.items():
+            globals()[k] = v
+        print(f"[Config] Successfully loaded overrides from: {yaml_path}")

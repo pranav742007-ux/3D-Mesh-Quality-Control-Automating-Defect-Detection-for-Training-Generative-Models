@@ -208,11 +208,14 @@ class MultiViewImageModel(nn.Module):
                     parent = getattr(parent, part)
                 setattr(parent, parts[-1], new_conv)
 
-        # ── View attention pooling ─────────────────────────────────────────
-        self.view_attention = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim // 4),
-            nn.Tanh(),
-            nn.Linear(self.embed_dim // 4, 1),
+        # ── Cross-view Multi-Head Attention pooling (Phase 4) ───────────────
+        self.view_pos_embed = nn.Embedding(self.num_views, self.embed_dim)
+        self.query_token = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+        self.cross_view_attention = nn.MultiheadAttention(
+            embed_dim=self.embed_dim,
+            num_heads=8,
+            dropout=0.1,
+            batch_first=True
         )
 
         # ── Classification head ────────────────────────────────────────────
@@ -230,7 +233,9 @@ class MultiViewImageModel(nn.Module):
 
     def _init_weights(self):
         """Initialize attention and classifier weights."""
-        for m in self.view_attention.modules():
+        nn.init.normal_(self.query_token, std=0.02)
+        # Initialize linear layers inside cross-view attention
+        for m in self.cross_view_attention.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
@@ -241,7 +246,7 @@ class MultiViewImageModel(nn.Module):
         Extract features from a batch of single views.
 
         Args:
-            view_batch: (B, 3, H, W) tensor
+            view_batch: (B, C, H, W) tensor
 
         Returns:
             (B, embed_dim) feature vectors
@@ -253,7 +258,7 @@ class MultiViewImageModel(nn.Module):
     def forward(self, views: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            views: (B, 6, 3, H, W) tensor of 6 views per batch item
+            views: (B, 6, 8, H, W) tensor of 6 views per batch item (8 channels)
 
         Returns:
             (B, 10) logits for each defect class
@@ -271,10 +276,24 @@ class MultiViewImageModel(nn.Module):
             features = self._extract_view_features(views_flat)
             features = features.reshape(B, V, self.embed_dim)
 
-        # ── Attention-weighted pooling ─────────────────────────────────────
-        attn_logits = self.view_attention(features)       # (B, V, 1)
-        attn_weights = F.softmax(attn_logits, dim=1)       # (B, V, 1)
-        pooled = (features * attn_weights).sum(dim=1)      # (B, embed_dim)
+        # Add view-position embeddings (Phase 4)
+        view_indices = torch.arange(V, device=views.device).unsqueeze(0).expand(B, -1)
+        pos_embeds = self.view_pos_embed(view_indices)
+        features = features + pos_embeds
+
+        # Mask out empty views (Phase 4)
+        flat_views = views.reshape(B, V, -1)
+        view_std = flat_views.std(dim=-1)
+        key_padding_mask = (view_std < 1e-4)
+        all_masked = key_padding_mask.all(dim=1)
+        key_padding_mask[all_masked, 0] = False
+
+        # Query token pooling via Cross-View Attention
+        q = self.query_token.expand(B, -1, -1)
+        pooled, _ = self.cross_view_attention(
+            q, features, features, key_padding_mask=key_padding_mask
+        )
+        pooled = pooled.squeeze(1)  # (B, embed_dim)
 
         # ── Classify ───────────────────────────────────────────────────────
         logits = self.classifier(pooled)
@@ -295,9 +314,21 @@ class MultiViewImageModel(nn.Module):
             features = self._extract_view_features(views_flat)
             features = features.reshape(B, V, self.embed_dim)
 
-        attn_logits = self.view_attention(features)
-        attn_weights = F.softmax(attn_logits, dim=1)
-        return attn_weights.squeeze(-1)  # (B, V)
+        view_indices = torch.arange(V, device=views.device).unsqueeze(0).expand(B, -1)
+        pos_embeds = self.view_pos_embed(view_indices)
+        features = features + pos_embeds
+
+        flat_views = views.reshape(B, V, -1)
+        view_std = flat_views.std(dim=-1)
+        key_padding_mask = (view_std < 1e-4)
+        all_masked = key_padding_mask.all(dim=1)
+        key_padding_mask[all_masked, 0] = False
+
+        q = self.query_token.expand(B, -1, -1)
+        _, attn_weights = self.cross_view_attention(
+            q, features, features, key_padding_mask=key_padding_mask
+        )
+        return attn_weights.squeeze(1)  # (B, V)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -758,6 +789,36 @@ class MeshFeatureMLP(nn.Module):
 # 3. FUSED ENSEMBLE MODEL  (unchanged from v2.0, backward compatible)
 # ═══════════════════════════════════════════════════════════════════════════
 
+class GatedModalityFusion(nn.Module):
+    """
+    Gated Modality Fusion Layer (Phase 5).
+    Learns dynamic attention weights (gates) via Softmax over Visual, Point Cloud, and Geometry modalities.
+    """
+    def __init__(self, d_model: int = 10, num_modalities: int = 3):
+        super().__init__()
+        self.num_modalities = num_modalities
+        self.gate_fc = nn.Linear(d_model * num_modalities, num_modalities)
+        
+    def forward(self, *modalities) -> torch.Tensor:
+        active_modalities = list(modalities)
+        while len(active_modalities) < self.num_modalities:
+            active_modalities.append(torch.zeros_like(active_modalities[0]))
+        if len(active_modalities) > self.num_modalities:
+            active_modalities = active_modalities[:self.num_modalities]
+            
+        # Concatenate and compute gate weights
+        concat = torch.cat(active_modalities, dim=1) # (B, d_model * num_modalities)
+        gate_logits = self.gate_fc(concat) # (B, num_modalities)
+        gate_weights = F.softmax(gate_logits, dim=1) # (B, num_modalities)
+        
+        # Weighted sum of modalities
+        fused = torch.zeros_like(active_modalities[0])
+        for i, m in enumerate(active_modalities):
+            fused = fused + m * gate_weights[:, i:i+1]
+            
+        return fused
+
+
 class FusedEnsembleModel(nn.Module):
     """
     Combines image-based, mesh-feature-based, and optionally PointNet-based predictions.
@@ -768,12 +829,7 @@ class FusedEnsembleModel(nn.Module):
     Fusion strategies:
     - 'late_average': weighted average of sigmoid outputs (2 or 3 branches)
     - 'concat_mlp': concatenate probability vectors, pass through MLP
-
-    IMPORTANT (gradient checkpointing + Grad-CAM compatibility):
-    We do NOT wrap the feature_extractor with checkpoint_sequential here,
-    because that replaces it with a CheckpointFunction which breaks
-    named_modules() traversal used by Grad-CAM. Instead, we enable
-    checkpointing in the training loop via torch.utils.checkpoint.checkpoint().
+    - 'gated': gated modality fusion (Phase 5)
     """
 
     def __init__(
@@ -818,6 +874,8 @@ class FusedEnsembleModel(nn.Module):
             )
             self.fusion_transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
             self.fusion_head = nn.Linear(64, self.num_classes)
+        elif fusion_method == "gated":
+            self.gated_fusion = GatedModalityFusion(d_model=self.num_classes, num_modalities=n_branches)
 
     def forward(
         self,
@@ -834,30 +892,50 @@ class FusedEnsembleModel(nn.Module):
         if mesh_features is None and self.pointnet_model is None:
             return image_logits
 
-        probs_list = [(self.image_weight, image_probs)]
+        probs_list = []
+        if self.fusion_method != "gated":
+            probs_list.append((self.image_weight, image_probs))
 
         if mesh_features is not None:
             mesh_logits = self.mesh_model(mesh_features)
             mesh_probs = torch.sigmoid(mesh_logits)
-            probs_list.append((self.mesh_weight, mesh_probs))
+            if self.fusion_method != "gated":
+                probs_list.append((self.mesh_weight, mesh_probs))
+        else:
+            mesh_probs = None
 
         if self.pointnet_model is not None and point_cloud is not None:
             pn_logits = self.pointnet_model(point_cloud)
             pn_probs = torch.sigmoid(pn_logits)
-            probs_list.append((self.pointnet_weight, pn_probs))
-
-        total_w = sum(w for w, _ in probs_list)
-        probs_list = [(w / total_w, p) for w, p in probs_list]
+            if self.fusion_method != "gated":
+                probs_list.append((self.pointnet_weight, pn_probs))
+        else:
+            pn_probs = None
 
         if self.fusion_method == "late_average":
+            total_w = sum(w for w, _ in probs_list)
+            probs_list = [(w / total_w, p) for w, p in probs_list]
             fused_probs = sum(w * p for w, p in probs_list)
             fused_probs = fused_probs.clamp(min=1e-7, max=1.0 - 1e-7)
             fused_logits = torch.log(fused_probs / (1.0 - fused_probs))
             return fused_logits
 
         elif self.fusion_method == "concat_mlp":
+            total_w = sum(w for w, _ in probs_list)
+            probs_list = [(w / total_w, p) for w, p in probs_list]
             concat = torch.cat([p for _, p in probs_list], dim=1)
             return self.fusion_mlp(concat)
+
+        elif self.fusion_method == "gated":
+            m_p = mesh_probs if mesh_probs is not None else torch.zeros_like(image_probs)
+            p_p = pn_probs if pn_probs is not None else torch.zeros_like(image_probs)
+            if self.pointnet_model is not None:
+                fused_probs = self.gated_fusion(image_probs, m_p, p_p)
+            else:
+                fused_probs = self.gated_fusion(image_probs, m_p)
+            fused_probs = fused_probs.clamp(min=1e-7, max=1.0 - 1e-7)
+            fused_logits = torch.log(fused_probs / (1.0 - fused_probs))
+            return fused_logits
 
         elif self.fusion_method == "transformer":
             img_token = self.img_prob_proj(image_probs).unsqueeze(1)

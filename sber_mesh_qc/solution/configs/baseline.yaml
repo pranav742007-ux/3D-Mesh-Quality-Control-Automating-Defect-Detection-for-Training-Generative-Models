@@ -1,0 +1,8 @@
+# SBER Mesh QC baseline configuration
+SEED: 42
+NUM_FOLDS: 5
+EPOCHS: 25
+BATCH_SIZE: 16
+USE_POINTNET_BRANCH: false
+USE_EXTENDED_FEATURES: true
+FUSION_METHOD: "late_average"

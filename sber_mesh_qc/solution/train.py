@@ -112,7 +112,7 @@ from config import (
     SEQUENTIAL_VIEWS_IN_MOE,       # Sequential view processing in MoE
 )
 from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality, safe_collate, clean_state_dict_keys
-from utils import optimize_thresholds_f1_final, learn_temperature
+from utils import optimize_thresholds_f1_final, learn_temperature, compute_calibration_metrics
 from config import get_class_weights
 from image_processing import MeshQualityDataset
 from models import (
@@ -939,6 +939,36 @@ def train_one_fold(
     print(f"    F1_final:   {final_metrics['f1_final']:.2f}")
     print(f"    Thresholds: {dict(zip(DEFECT_COLS, thresholds.round(3)))}")
 
+    # ── Calibration metrics reporting (Phase 6) ───────────────────────────
+    calib = compute_calibration_metrics(val_true_df[DEFECT_COLS].values, val_proba)
+    print(f"    Calibration Summary:")
+    print(f"      Brier Score: {calib['brier_score']:.4f}")
+    print(f"      ECE:         {calib['ece']:.4f}")
+    print(f"      MCE:         {calib['mce']:.4f}")
+
+    # ── Per-class metrics reporting (Phase 1) ─────────────────────────────
+    from sklearn.metrics import f1_score, average_precision_score, precision_score, recall_score
+    print("\n    Per-Class Detailed Evaluation:")
+    val_true_arr = val_true.values if hasattr(val_true, "values") else np.array(val_true)
+    for c, name in enumerate(DEFECT_COLS):
+        y_true_c = val_true_arr[:, c]
+        y_prob_c = val_proba[:, c]
+        y_pred_c = val_pred[:, c]
+        
+        prevalence = float(y_true_c.mean())
+        f1 = f1_score(y_true_c, y_pred_c, zero_division=0)
+        prec = precision_score(y_true_c, y_pred_c, zero_division=0)
+        rec = recall_score(y_true_c, y_pred_c, zero_division=0)
+        ap = average_precision_score(y_true_c, y_prob_c) if len(np.unique(y_true_c)) > 1 else 0.0
+        
+        # Count false positives on clean meshes
+        clean_mask = (val_true_arr.sum(axis=1) == 0)
+        fp_on_clean = int((y_pred_c[clean_mask] == 1).sum()) if clean_mask.any() else 0
+        pred_rate = float(y_pred_c.mean())
+        
+        print(f"      {name:15s} | Prev: {prevalence:.3f} | F1: {f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f} | AP: {ap:.4f} | PredRate: {pred_rate:.3f} | FP-Clean: {fp_on_clean}")
+    print("    " + "─" * 80 + "\n")
+
     fold_result = {
         "fold": fold,
         "best_epoch": best_epoch,
@@ -1069,18 +1099,40 @@ def train_full_cv(
         train_df["quality"] = derive_quality(defect_vals)
         print("  [INFO] Auto-derived missing 'quality' column from 10 defect labels")
 
-    skf = StratifiedKFold(
-        n_splits=NUM_FOLDS, shuffle=True, random_state=SEED
-    )
+    # Ensure mesh_group_id is present
+    if "mesh_group_id" not in train_df.columns:
+        import re
+        def get_base_prefix(item_id):
+            s = str(item_id)
+            s = re.sub(r'_(aug|repaired|decimated|cleaned|fixed|corrupt|noisy|simple|sub).*$', '', s)
+            return s
+        
+        base_names = train_df["item_id"].apply(get_base_prefix).values
+        if mesh_features is not None and len(mesh_features) == len(train_df):
+            # Vertices count is index 0, faces count is index 1
+            train_df["mesh_group_id"] = [f"{name}_V{int(mesh_features[i, 0])}_F{int(mesh_features[i, 1])}" for i, name in enumerate(base_names)]
+        else:
+            train_df["mesh_group_id"] = base_names
+            
+    print(f"  [Group splits] Total unique groups found: {train_df['mesh_group_id'].nunique()}")
+
+    try:
+        from sklearn.model_selection import StratifiedGroupKFold
+        gkf = StratifiedGroupKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
+        split_iter = gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values)
+        print("  [Group splits] Using StratifiedGroupKFold for leak-free, class-balanced validation.")
+    except ImportError:
+        from sklearn.model_selection import GroupKFold
+        gkf = GroupKFold(n_splits=NUM_FOLDS)
+        split_iter = gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values)
+        print("  [Group splits] Using GroupKFold for leak-free validation.")
 
     item_ids = train_df["item_id"].values
-    stratify_labels = train_df["quality"].values
-
     all_fold_results = []
     # Collect out-of-fold validation predictions for knowledge distillation (Grandmaster Phase 2)
     oof_predictions = np.zeros((len(train_df), len(DEFECT_COLS)))
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(item_ids, stratify_labels)):
+    for fold, (train_idx, val_idx) in enumerate(split_iter):
         # OVERRIDE BACKBONE FOR THIS FOLD (Heterogeneous CV - Step 1)
         import config as _cfg
         if hasattr(_cfg, "HETERO_CV_BACKBONES") and _cfg.HETERO_CV_BACKBONES:
@@ -1148,6 +1200,16 @@ def train_full_cv(
         "fold_results": all_fold_results,
     }
 
+    # Fit OOD detector on train features (Phase 8 Integration)
+    from explainability import OODDetector
+    try:
+        if mesh_features is not None:
+            print("\n  [OOD Detector] Fitting Mahalanobis OOD Detector on training features...")
+            ood_detector = OODDetector(mesh_features)
+            cv_result["ood_detector_params"] = ood_detector.save_to_dict()
+    except Exception as ood_err:
+        print(f"  [OOD Detector WARNING] Failed to fit OOD Detector: {ood_err}")
+
     cv_path = os.path.join(log_dir, "cv_results.json")
     with open(cv_path, "w") as f:
         json.dump(cv_result, f, indent=2, default=str)
@@ -1156,5 +1218,19 @@ def train_full_cv(
     soft_targets_path = os.path.join(log_dir, "train_soft_targets.npy")
     np.save(soft_targets_path, oof_predictions)
     print(f"  [OK] Saved ensembled soft targets to: {soft_targets_path}")
+
+    # Generate and save failure analysis gallery (Phase 8)
+    from explainability import save_failure_analysis_gallery
+    try:
+        save_failure_analysis_gallery(
+            val_true=train_df[DEFECT_COLS].values,
+            val_proba=oof_predictions,
+            item_ids=train_df["item_id"].tolist(),
+            thresholds=avg_thresholds,
+            class_names=DEFECT_COLS,
+            log_dir=log_dir
+        )
+    except Exception as e:
+        print(f"  [WARNING] Failure analysis gallery generation failed: {e}")
 
     return cv_result

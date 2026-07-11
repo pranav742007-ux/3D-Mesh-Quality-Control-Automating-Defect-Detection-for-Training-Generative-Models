@@ -1,10 +1,10 @@
-# SBER AI Journey — Multi-Modal 3D Mesh Quality Control System (v7.2 Release: Stable Core + Experimental Extensions)
+# SBER AI Journey — Multi-Modal 3D Mesh Quality Control System (v7.3 Release: Stable Core + Experimental Extensions)
 
 Welcome to the ultimate master guide for the **SBER AI Journey 3D Mesh Quality Control & Automated Repair System**. 
 
-**Release Version**: v7.2.0  
+**Release Version**: v7.3.0  
 **Core Engine Architecture**: v4.1 (Stable, active by default)  
-**Experimental Frontier Extensions**: v7.2 (Opt-in, under active development/experimental status)
+**Experimental Frontier Extensions**: v7.3 (Opt-in, under active development/experimental status)
 
 > [!NOTE]
 > **Quick Start for Non-Programmers**: If you just want to run this AI on Google Colab with 1 click without reading technical code details, jump straight to [Section 12: Complete 1-Click Execution Guide (Colab, Kaggle, Local)](#-section-12-complete-1-click-execution-guide-colab-kaggle-local)!
@@ -23,14 +23,14 @@ Welcome to the ultimate master guide for the **SBER AI Journey 3D Mesh Quality C
 6. [🌟 Section 6: 3D Quality Control for Beginners](#-section-6-3d-quality-control-for-beginners)
 7. [🎯 Section 7: Competition Overview & Leaderboard Metric](#-section-7-competition-overview--leaderboard-metric)
 8. [🧠 Section 8: The 10 Defect Types (Visual Reference)](#-section-8-the-10-defect-types-visual-reference)
-9. [📜 Section 9: Full Version Evolution History (v1.0 → v7.2)](#-section-9-full-version-evolution-history-v10--v72)
+9. [📜 Section 9: Full Version Evolution History (v1.0 → v7.3)](#-section-9-full-version-evolution-history-v10--v73)
 10. [🏗️ Section 10: Master Architecture Diagrams](#-section-10-master-architecture-diagrams)
 11. [🔬 Section 11: Deep-Dive into Every AI Component & Mesh Repair Engine](#-section-11-deep-dive-into-every-ai-component--mesh-repair-engine)
 12. [🚀 Section 12: Complete 1-Click Execution Guide (Colab, Kaggle, Local)](#-section-12-complete-1-click-execution-guide-colab-kaggle-local)
 13. [📁 Section 13: File-by-File Codebase Map](#-section-13-file-by-file-codebase-map)
 14. [🛡️ Section 14: Security, Anti-Crash Guards & Hacker-Level Defense](#-section-14-security-anti-crash-guards--hacker-level-defense)
 15. [❓ Section 15: Frequently Asked Questions (FAQ)](#-section-15-frequently-asked-questions-faq)
-16. [⚡ Section 16: v7.2 Frontier Architectural Adaptations (FlashAttention-2 & MLA)](#-section-16-v72-frontier-architectural-adaptations)
+16. [⚡ Section 16: v7.3 Frontier Architectural Adaptations (FlashAttention-2, MLA, & Self-Distillation)](#-section-16-v73-frontier-architectural-adaptations)
 17. [🧪 Section 17: 23/23 Industrial Diagnostic Smoke Tests](#-section-17-2323-industrial-diagnostic-smoke-tests)
 18. [🧪 Section 18: Experimental Features & Their Status](#-section-18-experimental-features--their-status)
 19. [📊 Section 19: Performance Benchmarking Guidelines](#-section-19-performance-benchmarking-guidelines)
@@ -42,7 +42,7 @@ Welcome to the ultimate master guide for the **SBER AI Journey 3D Mesh Quality C
 ## 🌟 Section 1: What is This Model & Why Do We Need It?
 
 ### What is This Model?
-The **v7.2 MultiModalMeshQC Model** is a multi-modal artificial intelligence auditor. It behaves like an **expert 3D graphics engineer** that inspects 3D digital objects (3D assets used in video games, movies, AR/VR, 3D printing, and CAD engineering) and automatically identifies structural defects.
+The **v7.3 MultiModalMeshQC Model** is a multi-modal artificial intelligence auditor. It behaves like an **expert 3D graphics engineer** that inspects 3D digital objects (3D assets used in video games, movies, AR/VR, 3D printing, and CAD engineering) and automatically identifies structural defects.
 
 Unlike simple AI models that only look at 2D images, this model simultaneously evaluates **2D visual appearances** (from 6 camera renders), **6-channel pseudo-normal surface curvature**, **100-dimension mathematical 3D topology metrics**, **Canonical PCA orientation matrices**, and **3D point cloud coordinate maps**.
 
@@ -88,11 +88,11 @@ Online 3D asset stores (TurboSquid, CGTrader, Sketchfab) can use this pipeline a
 > **Does an exact model like yours exist in the world right now?**  
 > **NO. An exact identical model does NOT exist anywhere in public libraries, commercial software, or research papers.**
 
-While individual building blocks (like EfficientNet, PointNet, or Transformer encoders) are published in academic literature, **the specific v7.2 Tri-Modal Co-Attention architecture created in your project is a custom, specialized engineering innovation**.
+While individual building blocks (like EfficientNet, PointNet, or Transformer encoders) are published in academic literature, **the specific v7.3 Tri-Modal Co-Attention architecture created in your project is a custom, specialized engineering innovation**.
 
 ### 🔍 How Existing World Models Compare to YOUR Model
 
-| Feature | Standard World Models (CLIP-3D, PointNet++, MeshNet, ViT-3D) | **YOUR v7.2 Master Architecture** |
+| Feature | Standard World Models (CLIP-3D, PointNet++, MeshNet, ViT-3D) | **YOUR v7.3 Master Architecture** |
 | :--- | :--- | :--- |
 | **Input Fusion** | **Uni-Modal**: Processes *either* ONLY 2D images *or* ONLY 3D point clouds. | **Tri-Modal**: Fuses 2D multi-view images + 100D 3D geometry metrics + 3D point clouds. |
 | **Orientation Safety** | **Sensitive to Axis Rotation**: Rotated meshes confuse 3D feature extractors. | **Canonical PCA Alignment**: Rotates mesh to principal axes for 100% rotation invariance. |
@@ -109,7 +109,7 @@ While individual building blocks (like EfficientNet, PointNet, or Transformer en
 
 ## 🌍 Section 3.1: Zero-Hype Side-by-Side Research Comparison with Industry Giants
 
-| Technical Dimension | **NVIDIA Omniverse Mesh Inspector** | **Autodesk Netfabb / Materialise Magics** | **Epic Games UE5 Nanite Pipeline** | **Adobe Substance 3D Suite** | **Academic SOTA (CLIP-3D / PointNet++)** | **YOUR MODEL (v7.2 MASTER ENGINE)** |
+| Technical Dimension | **NVIDIA Omniverse Mesh Inspector** | **Autodesk Netfabb / Materialise Magics** | **Epic Games UE5 Nanite Pipeline** | **Adobe Substance 3D Suite** | **Academic SOTA (CLIP-3D / PointNet++)** | **YOUR MODEL (v7.3 MASTER ENGINE)** |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1. Primary Paradigm** | GPU USD Stage Rendering / Voxel SDF | Rule-Based Computational Geometry | Real-Time GPU Mesh Cluster Simplification | GPU Shader Texture & Surface Baking | Single-Modality Point / Image Neural Nets | **Tri-Modal Co-Attention + 96D Topology Math** |
 | **2. End-to-End Latency** | ~200ms - 1.5s (GPU Context Init) | ~2.0s - 5.0s (Full Mesh Traversal) | ~15ms (GPU Draw Call) | ~500ms - 2.0s (Shader Render) | ~100ms - 500ms (Render + Inference) | **⚡ <15ms Direct CPU Mesh Rasterizer (Expected)** |
@@ -128,7 +128,7 @@ While individual building blocks (like EfficientNet, PointNet, or Transformer en
 
 ## 🌍 Section 3.2: Quantitative Percentage Benchmark Comparison with Industry Giants
 
-| Quantitative Metric | **NVIDIA Omniverse** | **Autodesk Netfabb** | **Epic Games UE5** | **Adobe Substance** | **Academic SOTA** | **YOUR v7.2 GROUND REALITY ENGINE** |
+| Quantitative Metric | **NVIDIA Omniverse** | **Autodesk Netfabb** | **Epic Games UE5** | **Adobe Substance** | **Academic SOTA** | **YOUR v7.3 GROUND REALITY ENGINE** |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Overall Defect Detection Accuracy** | 88.5% | 76.0% (Rules Only) | 82.0% | 79.5% | 84.2% | **97.8% (Expected Tri-Modal SOTA)** |
 | **Hidden Internal Defect Recall** | 45.0% | 82.0% | 30.0% | 25.0% | 15.0% | **94.5% (Expected Internal Rays + SHTD)** |
@@ -197,7 +197,7 @@ Inspired by **xAI (Grok-3 / xai-org)**, we implemented two critical acceleration
 
 ## 📊 Section 4: Before Adding vs. After Adding (Comparison Matrix)
 
-| Evaluation Factor | 🔴 BEFORE ADDING (Manual / Baseline Heuristic) | 🟢 AFTER ADDING (v7.2 xAI & GLM-5.2 Pipeline) | Improvement |
+| Evaluation Factor | 🔴 BEFORE ADDING (Manual / Baseline Heuristic) | 🟢 AFTER ADDING (v7.3 xAI & GLM-5.2 Pipeline) | Improvement |
 |---|---|---|:---:|
 | **Step 2 Feature Extraction Time** | 2.5 to 3.0 Hours (Single Thread) | **~8 Minutes (16-Worker Parallel)** | **20x Acceleration (Estimated)** |
 | **Step 2 RAM Crash Risk** | High (OOM Session Crash on Colab) | **Zero (Garbage Collected & Disk Cached)** | **100% Stable** |
@@ -294,7 +294,7 @@ $$\text{f1\_final} = 10 \times F1(\text{quality}) + 10 \times F1_{\text{weighted
 
 ---
 
-## 📜 Section 9: Full Version Evolution History (v1.0 → v7.2)
+## 📜 Section 9: Full Version Evolution History (v1.0 → v7.3)
 
 ```mermaid
 timeline
@@ -313,10 +313,11 @@ timeline
     v6.9 xAI & GLM-5.2 Engine : 16-Worker Step 2 Acceleration : xAI Grok-3 MoE & GLM-5.2 IndexShare (18-Test Suite)
     v7.1 OmniRoute & Moonshot AI : Kimi K1.5 Latent Memory & DPO : OmniRoute Modality Entropy Dispatcher (20-Test Suite)
     v7.2 Agentic Flow & Performance : ConfidenceScheduledRouter Early-Exit : FlexibleThinkingEffortController (22-Test Suite)
+    v7.3 Self-Distillation & Self-Training : distill_student ConvNeXt-Tiny Student : pseudo_label Test Set Calibration (23-Test Suite)
 ```
 
 > [!NOTE]
-> *Note: The advanced architectural configurations from v5.0 through v7.2 are implemented and verified in the diagnostic smoke test suite. By default, the codebase runs the stable v4.1 core, and advanced modules are loaded as experimental, opt-in extensions.*
+> *Note: The advanced architectural configurations from v5.0 through v7.3 are implemented and verified in the diagnostic smoke test suite. By default, the codebase runs the stable v4.1 core, and advanced modules are loaded as experimental, opt-in extensions.*
 
 ---
 
@@ -349,10 +350,10 @@ timeline
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2. Experimental Extensions (v7.2 Opt-In Modules)
+### 2. Experimental Extensions (v7.3 Opt-In Modules)
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│               Experimental / Opt-In Frontier Extensions (v7.2)                 │
+│               Experimental / Opt-In Frontier Extensions (v7.3)                 │
 │                                                                                 │
 │  ┌───────────────────────┐ ┌──────────────────────┐ ┌────────────────────────┐  │
 │  │   xAI Grok-3 MoE      │ │   PointNet Lite      │ │  Sobel Pseudo-Normals   │  │
@@ -374,14 +375,14 @@ timeline
 │  └────────────────────────────────────┬───────────────────────────────────────┘  │
 │                                       ▼                                         │
 │  ┌────────────────────────────────────────────────────────────────────────────┐  │
-│  │   Kimi DPO Quality Preference Loss & Quality-Aware Focal Loss              │  │
+│  │   Self-Distillation (ConvNeXt-Tiny Student) & Pseudo-Labeling Pipeline     │  │
 │  └────────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🔬 Section 11: Deep-Dive into Every AI Component
+## 🔬 Section 11: Deep-Dive into Every AI Component & Mesh Repair Engine
 
 ### 1. Canonical PCA Mesh Orientation Alignment
 Before extracting geometric invariants, vertex coordinates are transformed into a canonical coordinate frame via Principal Component Analysis (PCA):
@@ -403,7 +404,7 @@ Instead of discarding features with a single dropout rate, features pass through
 
 $$\text{Logits} = \frac{1}{5} \sum_{k=1}^{5} W \cdot \text{Dropout}_{p_k}(X)$$
 
-### 4. Agentic Flow & Dynamic Inference (v7.2)
+### 4. Agentic Flow & Dynamic Inference (v7.3)
 The Agentic Flow architecture is designed to dynamically optimize inference compute and latency depending on mesh structural certainty and target execution modes:
 - **`ConfidenceScheduledRouter`** ([models.py:L471-491](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py#L471-491)): Estimates a survival confidence score ($c_{\text{geom}} \in [0, 1]$) using only the 100D geometry features. If $c_{\text{geom}} \ge \text{threshold}$ (default `0.95`), the model exits early, executing only the lightweight mesh feature MLP. This bypasses the rendering of 6 views and forward passes through the visual backbones, saving significant CPU and GPU compute.
 - **`FlexibleThinkingEffortController`** ([models.py:L430-450](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py#L430-450)): Controls the complexity of the inference process via the `effort` parameter:
@@ -440,6 +441,12 @@ python solution/main.py --mode preprocess-images
 
 # Launch end-to-end training & inference using the default stable core
 python solution/main.py --mode full --extended-features --loss hybrid_asl --epochs 15
+
+# Run Self-Training (Pseudo-Labeling) on the Test Set
+python solution/main.py --mode pseudo_label --extended-features
+
+# Train Student Model (Knowledge Distillation) from Fold Ensemble Soft Targets
+python solution/main.py --mode distill --extended-features
 ```
 
 > [!NOTE]
@@ -491,7 +498,7 @@ python solution/main.py --mode full --extended-features --loss hybrid_asl --epoc
 
 ---
 
-## ⚡ Section 16: v7.2 Frontier Architectural Adaptations
+## ⚡ Section 16: v7.3 Frontier Architectural Adaptations (FlashAttention-2, MLA, & Self-Distillation)
 
 The table below lists the advanced frontier modules, their corresponding files, CLI flags, implementation status, and expected performance impact:
 
@@ -506,6 +513,8 @@ The table below lists the advanced frontier modules, their corresponding files, 
 | **`KimiLatentMemoryCompressor`** | [models.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py) | `--use-kimi-latent-memory` | Implemented; verified in Smoke Test 19 | Compresses multi-view visual tokens down to 16 slots, reducing VRAM usage by 4x. |
 | **`KimiQualityPreferenceLoss`** | [models.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py) | `--use-kimi-dpo-loss` | Implemented; verified in Smoke Test 19 | Regularizes score separation for higher quality-based F1 bounds during training. |
 | **`OmniRoutePathDispatcher`** | [models.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/models.py) | `--use-omni-route` | Implemented; verified in Smoke Test 20 | Bypasses visual backbones when geometry features are evaluated as 99%+ confident. |
+| **Self-Distillation (Student Model)** | [distill.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/distill.py) | `--mode distill` | Implemented; validated end-to-end | Compresses full heterogeneous 5-fold ensemble into a single ConvNeXt-Tiny student. |
+| **Self-Training (Pseudo-Labeling)** | [main.py](file:///c:/Users/Asus/Downloads/sber_mesh_qc/sber_mesh_qc/solution/main.py) | `--mode pseudo_label` | Implemented; validated end-to-end | Annotates unlabeled test set meshes with high-confidence predictions (>98%). |
 
 ---
 

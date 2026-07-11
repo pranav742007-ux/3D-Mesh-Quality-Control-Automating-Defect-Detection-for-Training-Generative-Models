@@ -389,6 +389,26 @@ def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path
         point_clouds=point_clouds,
     )
 
+    # ── Feature Drift Monitoring (Phase 10 Integration) ──────────────────
+    import config as cfg
+    from drift_monitor import monitor_feature_drift
+    import json
+    
+    # Check if we can find train feature cache to use as reference
+    train_cache_name = "mesh_features_train_extended.npy" if cfg.USE_EXTENDED_FEATURES else "mesh_features_train_basic.npy"
+    found_train = _find_cache_file(train_cache_name, base_dir, data_dir)
+    if found_train and test_features is not None:
+        try:
+            print("\n  [Drift Monitor] Running Production Feature Drift check...")
+            train_feats = np.load(found_train)
+            drift_report = monitor_feature_drift(train_feats, test_features, cfg.FEATURE_ORDER if cfg.USE_EXTENDED_FEATURES else cfg.FEATURE_ORDER[:58])
+            drift_report_path = os.path.join(log_dir, "drift_report.json")
+            with open(drift_report_path, "w") as f_drift:
+                json.dump(drift_report, f_drift, indent=2)
+            print(f"  [Drift Monitor OK] Drift report saved to: {drift_report_path}")
+        except Exception as e:
+            print(f"  [Drift Monitor WARNING] Failed to run drift monitor: {e}")
+
     print(f"\n  Submission saved to: {submission_path}")
     return submission_path
 
@@ -504,11 +524,12 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="full",
-        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images", "pseudo_label", "pseudo-label", "distill"],
+        choices=["full", "download", "features", "train", "infer", "all_no_download", "preprocess_images", "preprocess-images", "pseudo_label", "pseudo-label", "distill", "audit"],
         help="Pipeline mode: full (everything), download, features, train, infer, "
              "all_no_download (features+train+infer), preprocess_images (offline cropping), "
              "pseudo_label (self-training test pseudo-label generation), "
-             "distill (train fast student model from soft teacher targets)",
+             "distill (train fast student model from soft teacher targets), "
+             "audit (run dataset integrity audit)",
     )
     parser.add_argument("--base-dir", "--base_dir", type=str, default=None,
                         help="Project base directory (auto-detected if not set)")
@@ -565,7 +586,9 @@ def main():
     parser.add_argument("--use-omni-route", action="store_true", default=None,
                         help="Enable OmniRoute Dynamic Path Dispatcher")
     parser.add_argument("--preprocess-images", "--preprocess_images", action="store_true", default=False,
-                        help="Pre-crop and pre-resize all images offline (saves time)")
+                         help="Pre-crop and pre-resize all images offline (saves time)")
+    parser.add_argument("--config", type=str, default=None,
+                         help="Path to YAML configuration file (Phase 7)")
 
     args, unknown = parser.parse_known_args()
 
@@ -585,6 +608,8 @@ def main():
     print("=" * 60)
     # ── Import config (must be before any config references below) ──────────
     import config
+    if args.config:
+        config.load_yaml_config(args.config)
 
     print(f"  Base directory: {base_dir}")
     print(f"  Mode: {args.mode}")
@@ -824,6 +849,16 @@ def main():
             checkpoint_dir=checkpoint_dir,
             log_dir=log_dir,
         )
+
+    elif args.mode == "audit":
+        from dataset_audit import run_dataset_audit
+        train_csv = os.path.join(data_dir, "train.csv")
+        test_csv = os.path.join(data_dir, "test.csv")
+        rep = run_dataset_audit(data_dir, train_csv, test_csv)
+        out_path = os.path.join(log_dir, "dataset_report.json")
+        with open(out_path, "w") as f:
+            json.dump(rep, f, indent=2)
+        print(f"Audit report saved to: {out_path}")
 
     print("\n" + "=" * 60)
     print("  PIPELINE COMPLETE")

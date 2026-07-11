@@ -353,6 +353,62 @@ def derive_quality(defect_preds: np.ndarray) -> np.ndarray:
     return (defect_preds.sum(axis=1) == 0).astype(int)
 
 
+def derive_quality_probabilities(defect_probs: np.ndarray) -> np.ndarray:
+    """
+    Enforces clean probability target consistency constraint using stable log formulation (Phase 6):
+    P(clean) = \prod_{k=1}^K (1 - P(defect_k))
+    """
+    clipped = np.clip(defect_probs, 0.0, 1.0 - 1e-6)
+    log_clean_prob = np.log1p(-clipped).sum(axis=1)
+    return np.exp(log_clean_prob)
+
+
+def compute_calibration_metrics(y_true: np.ndarray, y_prob: np.ndarray, num_bins: int = 10) -> dict:
+    """
+    Compute Expected Calibration Error (ECE), Maximum Calibration Error (MCE), and Brier Score.
+    """
+    from sklearn.metrics import brier_score_loss
+    
+    brier_scores = []
+    for c in range(y_true.shape[1]):
+        brier_scores.append(brier_score_loss(y_true[:, c], y_prob[:, c]))
+    mean_brier = float(np.mean(brier_scores))
+    
+    ece_list = []
+    mce_list = []
+    
+    for c in range(y_true.shape[1]):
+        y_true_c = y_true[:, c]
+        y_prob_c = y_prob[:, c]
+        
+        bin_boundaries = np.linspace(0, 1, num_bins + 1)
+        ece = 0.0
+        mce = 0.0
+        
+        for i in range(num_bins):
+            bin_lower = bin_boundaries[i]
+            bin_upper = bin_boundaries[i + 1]
+            
+            in_bin = (y_prob_c >= bin_lower) & (y_prob_c < bin_upper)
+            prop_in_bin = np.mean(in_bin)
+            
+            if prop_in_bin > 0:
+                accuracy_in_bin = np.mean(y_true_c[in_bin])
+                confidence_in_bin = np.mean(y_prob_c[in_bin])
+                diff = np.abs(confidence_in_bin - accuracy_in_bin)
+                ece += prop_in_bin * diff
+                mce = max(mce, diff)
+                
+        ece_list.append(ece)
+        mce_list.append(mce)
+        
+    return {
+        "brier_score": mean_brier,
+        "ece": float(np.mean(ece_list)),
+        "mce": float(np.max(mce_list))
+    }
+
+
 def sigmoid(x: np.ndarray) -> np.ndarray:
     """Numerically stable sigmoid."""
     return np.where(x >= 0,

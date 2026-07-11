@@ -95,24 +95,6 @@ def find_boundary_edge_loops(faces: np.ndarray) -> List[List[int]]:
     return loops
 
 
-def repair_open_holes(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
-    """
-    Ear-clipping triangulation algorithm closing non-manifold boundary edge loops.
-    """
-    if vertices is None or faces is None or len(faces) == 0:
-        return vertices, faces, 0
-
-    loops = find_boundary_edge_loops(faces)
-    if not loops:
-        return vertices, faces, 0
-
-    # P1-24 FIX: Build existing edge set to prevent duplicate non-manifold edges
-    existing_edges = set()
-    for f in faces:
-        existing_edges.add((f[0], f[1]))
-        existing_edges.add((f[1], f[2]))
-        existing_edges.add((f[2], f[0]))
-
 def triangulate_loop_3d(vertices: np.ndarray, loop: list) -> list:
     """
     Robust 3D boundary loop triangulation using 2D projection and ear-clipping.

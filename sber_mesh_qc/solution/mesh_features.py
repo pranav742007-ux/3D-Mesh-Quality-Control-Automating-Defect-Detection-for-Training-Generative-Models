@@ -155,7 +155,7 @@ def _sanitize_path(base_dir: str, filename: str) -> str:
 def canonical_pca_orientation(vertices: np.ndarray) -> np.ndarray:
     """
     Aligns 3D mesh vertices along canonical Principal Component Analysis (PCA) axes.
-    Enforces deterministic skewness sign orientation to eliminate non-unique SVD/EIG axis flipping.
+    Enforces right-handed coordinate orientation and deterministic axes sign conventions.
     """
     if vertices is None or len(vertices) < 3:
         return vertices
@@ -165,11 +165,16 @@ def canonical_pca_orientation(vertices: np.ndarray) -> np.ndarray:
     sort_idx = np.argsort(eigenvalues)[::-1]
     rotation_matrix = eigenvectors[:, sort_idx].copy()
 
-    # Enforce deterministic sign orientation based on projection cubic skewness
+    # Enforce deterministic sign orientation using skewness
     projections = centered @ rotation_matrix
     for i in range(3):
-        if np.sum(projections[:, i] ** 3) < 0:
+        skew = np.mean((projections[:, i] - np.mean(projections[:, i]))**3)
+        if skew < 0:
             rotation_matrix[:, i] *= -1.0
+
+    # Force right-handed coordinate system (determinant = +1)
+    if np.linalg.det(rotation_matrix) < 0:
+        rotation_matrix[:, -1] *= -1.0
 
     aligned = centered @ rotation_matrix
     return aligned
@@ -238,31 +243,33 @@ def compute_spherical_harmonics_descriptors(vertices: np.ndarray, max_degree: in
     return power_spectrum
 
 
-def compute_topological_betti_numbers(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+def compute_topological_invariants(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     """
-    Computes DSU Euler Invariants (connected components beta_0, boundary edge loops beta_1, Euler char chi).
-    Linear O(V + E) execution time (<1ms per mesh).
+    Computes audited topological invariants (connected components, euler char,
+    boundary loops, cycle rank, manifold flag, and conditional genus).
     """
     if vertices is None or faces is None or len(vertices) == 0 or len(faces) == 0:
-        return np.zeros(3, dtype=np.float32)
+        return np.zeros(6, dtype=np.float32)
 
     V = len(vertices)
     F = len(faces)
 
+    # Extract unique edges
     edges = np.vstack([
         faces[:, [0, 1]],
         faces[:, [1, 2]],
         faces[:, [2, 0]]
     ])
     sorted_edges = np.sort(edges, axis=1)
-    # Fast 1D unique mapping by packing 2D edges into 64-bit integers
     packed_edges = sorted_edges[:, 0].astype(np.int64) * (V + 1) + sorted_edges[:, 1]
-    unique_packed = np.unique(packed_edges)
+    unique_packed, edge_counts = np.unique(packed_edges, return_counts=True)
     E = len(unique_packed)
+
     unique_edges = np.zeros((E, 2), dtype=np.int32)
     unique_edges[:, 0] = (unique_packed // (V + 1)).astype(np.int32)
     unique_edges[:, 1] = (unique_packed % (V + 1)).astype(np.int32)
 
+    # 1. Connected components (graph_component_count)
     try:
         from scipy.sparse import coo_matrix
         from scipy.sparse.csgraph import connected_components
@@ -271,45 +278,73 @@ def compute_topological_betti_numbers(vertices: np.ndarray, faces: np.ndarray) -
         rows = valid_edges[:, 0]
         cols = valid_edges[:, 1]
         adj = coo_matrix((np.ones(len(rows), dtype=bool), (rows, cols)), shape=(V, V))
-        beta_0, _ = connected_components(adj, directed=False)
+        graph_component_count, _ = connected_components(adj, directed=False)
     except Exception:
-        use_numba = False
-        if HAS_NUMBA:
+        parent = list(range(V))
+        def find(i):
+            path = []
+            while parent[i] != i:
+                path.append(i)
+                i = parent[i]
+            for node in path:
+                parent[node] = i
+            return i
+
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_i] = root_j
+
+        for u, v in unique_edges:
+            if u < V and v < V:
+                union(u, v)
+        graph_component_count = len(set(find(i) for i in range(V)))
+
+    # 2. Euler characteristic
+    euler_characteristic = V - E + F
+
+    # 3. Boundary edges & loop count
+    boundary_edges_mask = (edge_counts == 1)
+    boundary_edge_count = int(boundary_edges_mask.sum())
+    
+    boundary_loop_count = 0
+    if boundary_edge_count > 0:
+        boundary_edges = unique_edges[boundary_edges_mask]
+        if len(boundary_edges) > 0:
+            b_verts = np.unique(boundary_edges)
+            v_map = {v: idx for idx, v in enumerate(b_verts)}
+            b_adj_rows = [v_map[e[0]] for e in boundary_edges]
+            b_adj_cols = [v_map[e[1]] for e in boundary_edges]
             try:
-                import config as cfg
-                use_numba = getattr(cfg, "USE_NUMBA", True)
+                from scipy.sparse import coo_matrix
+                from scipy.sparse.csgraph import connected_components
+                b_adj = coo_matrix((np.ones(len(b_adj_rows), dtype=bool), (b_adj_rows, b_adj_cols)), shape=(len(b_verts), len(b_verts)))
+                boundary_loop_count, _ = connected_components(b_adj, directed=False)
             except Exception:
-                use_numba = True
+                boundary_loop_count = 1
 
-        if use_numba:
-            beta_0 = int(_numba_union_find_components(unique_edges.astype(np.int32), V))
-        else:
-            parent = list(range(V))
-            def find(i):
-                path = []
-                while parent[i] != i:
-                    path.append(i)
-                    i = parent[i]
-                for node in path:
-                    parent[node] = i
-                return i
+    # 4. Cycle rank
+    edge_cycle_rank = E - V + graph_component_count
 
-            def union(i, j):
-                root_i = find(i)
-                root_j = find(j)
-                if root_i != root_j:
-                    parent[root_i] = root_j
+    # 5. Manifold flag
+    is_manifold = float(np.all(edge_counts <= 2) and boundary_edge_count == 0)
 
-            for u, v in unique_edges:
-                if u < V and v < V:
-                    union(u, v)
+    # 6. Genus
+    is_closed = (boundary_edge_count == 0)
+    if is_closed and is_manifold:
+        genus = float((2 * graph_component_count - euler_characteristic) / 2)
+    else:
+        genus = -1.0
 
-            beta_0 = len(set(find(i) for i in range(V)))
-
-    euler_chi = V - E + F
-    beta_1 = max(0, beta_0 - euler_chi)
-
-    return np.array([float(beta_0), float(beta_1), float(euler_chi)], dtype=np.float32)
+    return np.array([
+        float(graph_component_count),
+        float(euler_characteristic),
+        float(boundary_loop_count),
+        float(edge_cycle_rank),
+        float(is_manifold),
+        float(genus)
+    ], dtype=np.float32)
 
 
 
@@ -819,7 +854,7 @@ FEATURE_ORDER = [
     "depth_skew_2", "depth_kurtosis_2", "depth_entropy_2",
     "surface_roughness_mean", "surface_roughness_std", "surface_roughness_max",
 ]
-MESH_FEATURE_DIM_EXTENDED = 100  # 68 basic + 25 SHTD + 3 Betti + 1 QEM + 3 Physics
+MESH_FEATURE_DIM_EXTENDED = 103  # 68 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics
 
 
 def _safe_skew(arr: np.ndarray) -> float:
@@ -978,7 +1013,7 @@ def extract_mesh_features_from_file(npz_path: str, extended: bool = True) -> np.
     # Reject completely degenerate meshes before feature extraction (Phase 7)
     is_degenerate = (len(vertices) < 4) or (len(faces) < 1)
     if is_degenerate:
-        feat_dim = 100 if extended else 58
+        feat_dim = 103 if extended else 58
         return np.full(feat_dim, -5.0, dtype=np.float32) # OOD signal
 
     features = compute_mesh_features(vertices, faces)
@@ -986,11 +1021,11 @@ def extract_mesh_features_from_file(npz_path: str, extended: bool = True) -> np.
     if extended:
         base_vector = np.array([features.get(k, 0.0) for k in FEATURE_ORDER], dtype=np.float32)
         shtd_vector = compute_spherical_harmonics_descriptors(vertices)
-        betti_vector = compute_topological_betti_numbers(vertices, faces)
+        topo_vector = compute_topological_invariants(vertices, faces)
         qem_score = np.array([compute_qem_decimation_stability(vertices, faces)], dtype=np.float32)
         phys_dict = compute_physics_stability_metric(vertices, faces)
         phys_vector = np.array([phys_dict["com_height"], phys_dict["support_radius"], phys_dict["tipping_angle_deg"]], dtype=np.float32)
-        return np.concatenate([base_vector, shtd_vector, betti_vector, qem_score, phys_vector], axis=0)
+        return np.concatenate([base_vector, shtd_vector, topo_vector, qem_score, phys_vector], axis=0)
     else:
         order = FEATURE_ORDER[:58]
         return np.array([features.get(k, 0.0) for k in order], dtype=np.float32)

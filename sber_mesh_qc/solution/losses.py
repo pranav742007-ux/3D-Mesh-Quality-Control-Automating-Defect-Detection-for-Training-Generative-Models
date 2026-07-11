@@ -278,9 +278,10 @@ class QualityAwareHardDefectFocalLoss(nn.Module):
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         loss = focal_weight * quality_multiplier * bce
         
-        if self.reduction == "mean":
+        red = reduction if reduction is not None else self.reduction
+        if red == "mean":
             return loss.mean()
-        elif self.reduction == "sum":
+        elif red == "sum":
             return loss.sum()
         return loss
 

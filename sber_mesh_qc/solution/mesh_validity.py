@@ -164,10 +164,9 @@ class MeshValidityAnalyzer:
         mins = np.min(tri_points, axis=1)
         maxs = np.max(tri_points, axis=1)
 
-        F = len(faces)
         if F > 2000:
-            # Subsample for execution safety
-            idx = np.random.choice(F, 2000, replace=False)
+            rng = np.random.RandomState(42)
+            idx = rng.choice(F, 2000, replace=False)
             mins = mins[idx]
             maxs = maxs[idx]
             faces_subset = faces[idx]

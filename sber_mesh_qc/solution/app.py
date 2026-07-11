@@ -80,10 +80,13 @@ import io
 import base64
 import traceback
 
-DEFECT_COLS = [
-    "abstract", "artifacts", "intersection", "lowpoly",
-    "noisy", "open", "partial", "scale", "set", "simple"
-]
+try:
+    from config import DEFECT_COLS
+except ImportError:
+    DEFECT_COLS = [
+        "abstract", "artifacts", "intersection", "lowpoly",
+        "noisy", "open", "partial", "scale", "set", "simple"
+    ]
 
 
 # =============================================================================
@@ -848,6 +851,10 @@ Examples:
 
 
 def run_benchmark_mode(args):
+    if not HAS_TORCH:
+        print("[ERROR] PyTorch is required for benchmark mode. Install via: pip install torch torchvision")
+        return
+
     print(f"\n{'=' * 60}")
     print(f"  DEPLOYMENT BENCHMARK SUITE")
     print(f"{'=' * 60}")

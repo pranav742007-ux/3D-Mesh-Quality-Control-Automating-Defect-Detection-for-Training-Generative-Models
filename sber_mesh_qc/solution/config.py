@@ -344,9 +344,6 @@ USE_CLEAN_SHIELD = True  # Enable Clean Mesh Shield Loss
 # EMA is already enabled above.  Do not combine it with SWA by default: the
 # two averaging schemes need a validation comparison before either replaces a
 # selected checkpoint.
-USE_SWA = True  # Enable SWA (Grandmaster Phase 3)
-SWA_START_EPOCH = 15  # Start averaging with ~5 epochs left
-SWA_LR = 5e-5  # Very low LR for SWA phase
 USE_GRADIENT_NORMALS = False  # Enable 6-channel Sobel pseudo-normals
 USE_CROSS_MODAL_ATTENTION = False  # Enable Bi-Directional Image <-> Geometry Attention
 IMAGE_IN_CHANNELS = 8  # 3ch RGB + 5ch Upgraded CPU Geometry Renders (Depth, normals, mask)

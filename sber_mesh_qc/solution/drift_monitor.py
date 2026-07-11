@@ -7,7 +7,11 @@ Phase 10 Production Monitoring & Feature Drift. Evaluates Population Stability I
 ===============================================================================
 """
 import numpy as np
-from scipy import stats
+try:
+    from scipy import stats
+except ImportError:
+    stats = None
+    print("[WARNING] scipy not installed. Drift monitoring features will be limited.")
 
 def calculate_psi(expected: np.ndarray, actual: np.ndarray, num_bins: int = 10) -> float:
     """
@@ -57,7 +61,10 @@ def monitor_feature_drift(train_features: np.ndarray, prod_features: np.ndarray,
         psi = calculate_psi(train_col, prod_col)
         # Calculate Wasserstein distance
         try:
-            w_dist = float(stats.wasserstein_distance(train_col, prod_col))
+            if stats is not None:
+                w_dist = float(stats.wasserstein_distance(train_col, prod_col))
+            else:
+                w_dist = 0.0
         except Exception:
             w_dist = 0.0
             

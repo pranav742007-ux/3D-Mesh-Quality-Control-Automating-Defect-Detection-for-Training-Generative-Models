@@ -354,7 +354,7 @@ def step_train(train_features, data_dir, checkpoint_dir, log_dir, point_clouds=N
 
 
 def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path,
-               point_clouds=None):
+               point_clouds=None, base_dir=None):
     """Step 4: Inference with TTA + submission generation.
 
     v2.0: Passes point_clouds for optional PointNet branch.
@@ -394,7 +394,9 @@ def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path
     from drift_monitor import monitor_feature_drift
     import json
     
-    # Check if we can find train feature cache to use as reference
+    # Resolve base_dir in this scope to prevent NameError
+    if base_dir is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     train_cache_name = "mesh_features_train_extended.npy" if cfg.USE_EXTENDED_FEATURES else "mesh_features_train_basic.npy"
     found_train = _find_cache_file(train_cache_name, base_dir, data_dir)
     if found_train and test_features is not None:
@@ -695,32 +697,9 @@ def main():
     if solution_dir not in sys.path:
         sys.path.insert(0, solution_dir)
 
-    # ── Short-circuit for offline image preprocessing if requested ──────────
+    # If preprocess_images flag is set, coerce mode to preprocess-images
     if getattr(args, "preprocess_images", False):
-        from image_processing import preprocess_images_offline
-        train_csv = os.path.join(data_dir, "train.csv")
-        test_csv = os.path.join(data_dir, "test.csv")
-        
-        if os.path.isfile(train_csv):
-            train_df = pd.read_csv(train_csv)
-            train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
-            train_ids = train_df["item_id"].tolist()
-            train_img_dir = os.path.join(data_dir, "train")
-            train_out_dir = os.path.join(data_dir, "train_tensors")
-            print(f"Preprocessing train images ({len(train_ids)} items)...")
-            preprocess_images_offline(train_img_dir, train_out_dir, train_ids, image_size=config.IMAGE_SIZE)
-            
-        if os.path.isfile(test_csv):
-            test_df = pd.read_csv(test_csv)
-            test_df = test_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
-            test_ids = test_df["item_id"].tolist()
-            test_img_dir = os.path.join(data_dir, "test")
-            test_out_dir = os.path.join(data_dir, "test_tensors")
-            print(f"Preprocessing test images ({len(test_ids)} items)...")
-            preprocess_images_offline(test_img_dir, test_out_dir, test_ids, image_size=config.IMAGE_SIZE)
-            
-        print("[OK] Images preprocessed offline.")
-        sys.exit(0)
+        args.mode = "preprocess-images"
 
     # ── Execute pipeline ───────────────────────────────────────────────────
     train_features = None
@@ -738,7 +717,7 @@ def main():
                 data_dir, base_dir, num_points=config.POINTNET_NUM_POINTS
             )
         step_train(train_features, data_dir, checkpoint_dir, log_dir, train_pcs)
-        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs)
+        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs, base_dir=base_dir)
 
     elif args.mode == "download":
         step_download(data_dir, base_dir)
@@ -772,7 +751,7 @@ def main():
             _, test_pcs = step_extract_point_clouds(
                 data_dir, base_dir, num_points=config.POINTNET_NUM_POINTS
             )
-        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs)
+        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs, base_dir=base_dir)
 
     elif args.mode == "all_no_download":
         train_features, test_features = step_extract_features(
@@ -783,7 +762,7 @@ def main():
                 data_dir, base_dir, num_points=config.POINTNET_NUM_POINTS
             )
         step_train(train_features, data_dir, checkpoint_dir, log_dir, train_pcs)
-        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs)
+        step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path, test_pcs, base_dir=base_dir)
 
     elif args.mode in ["preprocess_images", "preprocess-images"]:
         from image_processing import preprocess_images_offline

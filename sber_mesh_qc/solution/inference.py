@@ -48,9 +48,6 @@ from models import (
 )
 
 
-# Cache whether we're in MoE mode (set once at import time)
-_IS_MOE = USE_MOE
-
 
 def build_model_for_inference(fold: int, input_mesh_dim: Optional[int] = None):
     """
@@ -152,7 +149,7 @@ def ensemble_inference(
     folds_to_use: list = None,
     strict_loading: bool = True,
     effort: str = "max",
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run ensemble inference across all trained folds.
 

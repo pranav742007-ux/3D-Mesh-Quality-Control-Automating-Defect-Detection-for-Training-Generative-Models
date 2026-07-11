@@ -29,11 +29,6 @@ if sol_dir not in sys.path:
 
 import torch.nn as nn
 
-# Add solution directory to Python path
-sol_dir = os.path.dirname(os.path.abspath(__file__))
-if sol_dir not in sys.path:
-    sys.path.insert(0, sol_dir)
-
 import config
 from models import MultiViewImageModel, FusedEnsembleModel, MultiModalMeshQCModelV7
 from losses import build_loss_function, HybridFocalASLLoss

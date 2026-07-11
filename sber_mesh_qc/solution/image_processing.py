@@ -22,17 +22,7 @@ Image.MAX_IMAGE_PIXELS = 50_000_000
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def _sanitize_item_id(item_id) -> str:
-    """Sanitize item_id to prevent path traversal via malicious CSV values.
-    Allows alphanumeric, dashes, underscores, and dots (not double dots).
-    """
-    s = str(item_id).strip()
-    if '..' in s or s.startswith('/') or s.startswith('\\') or ':' in s:
-        raise ValueError(f"[SECURITY] Suspicious item_id rejected: '{item_id}'")
-    safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '', s)
-    if not safe:
-        raise ValueError(f"[SECURITY] Empty item_id after sanitization: '{item_id}'")
-    return safe
+from data_utils import _sanitize_item_id
 
 
 class DirectMeshRasterizer:
@@ -669,7 +659,7 @@ class TTATransform:
                 self.transforms.append({"flip": flip, "rotation": rot})
 
     def __len__(self):
-        return len(self.transforms)
+        return len(self.transforms) + 2
 
     def apply(self, views_tensor: torch.Tensor) -> list:
         """

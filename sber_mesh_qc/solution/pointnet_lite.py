@@ -170,15 +170,7 @@ def sample_point_cloud(
     return sampled.astype(np.float32)
 
 
-def _sanitize_item_id(item_id) -> str:
-    import re
-    s = str(item_id).strip()
-    if '..' in s or s.startswith('/') or s.startswith('\\') or ':' in s:
-        raise ValueError(f"[SECURITY] Suspicious item_id rejected: '{item_id}'")
-    safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '', s)
-    if not safe:
-        raise ValueError(f"[SECURITY] Empty item_id after sanitization: '{item_id}'")
-    return safe
+from data_utils import _sanitize_item_id
 
 
 def batch_extract_point_clouds(

@@ -233,8 +233,9 @@ def optimize_thresholds_f1_final(
             best_result_fun = res.fun
             best_result_x = np.clip(res.x, search_range[0], search_range[1])
 
+        _refine_rng = np.random.RandomState(12345)
         for _ in range(4):
-            x0 = np.random.uniform(0.2, 0.8, n_classes)
+            x0 = _refine_rng.uniform(0.2, 0.8, n_classes)
             res = minimize(objective, x0=x0, method='Powell', bounds=bounds, options={'maxiter': 50, 'disp': False})
             if res.fun < best_result_fun:
                 best_result_fun = res.fun

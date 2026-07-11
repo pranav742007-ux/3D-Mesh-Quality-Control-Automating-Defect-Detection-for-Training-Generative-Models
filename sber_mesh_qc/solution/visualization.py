@@ -26,17 +26,7 @@ except ImportError:
 from typing import Optional
 
 
-def _sanitize_item_id(item_id) -> str:
-    """Sanitize item_id to prevent path traversal via malicious CSV values.
-    Allows alphanumeric, dashes, underscores, and dots (not double dots).
-    """
-    s = str(item_id).strip()
-    if '..' in s or s.startswith('/') or s.startswith('\\') or ':' in s:
-        raise ValueError(f"[SECURITY] Suspicious item_id rejected: '{item_id}'")
-    safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '', s)
-    if not safe:
-        raise ValueError(f"[SECURITY] Empty item_id after sanitization: '{item_id}'")
-    return safe
+from data_utils import _sanitize_item_id
 
 
 

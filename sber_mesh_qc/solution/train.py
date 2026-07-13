@@ -100,6 +100,9 @@ from config import (
     USE_SWA,                       # Stochastic Weight Averaging
     SWA_START_EPOCH,               # SWA start epoch
     SWA_LR,                        # SWA learning rate
+    USE_SEPARATE_QUALITY_MODEL,
+    QUALITY_MODEL_THRESHOLD,
+    ABSTRACT_THRESHOLD_MAX,
     # v3.0 imports — Octopus MoE
     USE_MOE,                       # Enable MoE architecture
     MOE_EXPERT_CONFIGS,            # Expert backbone configurations
@@ -113,6 +116,7 @@ from config import (
 )
 from utils import set_seed, compute_f1_final, optimize_thresholds, derive_quality, safe_collate, clean_state_dict_keys
 from utils import optimize_thresholds_f1_final, learn_temperature, compute_calibration_metrics
+from utils import fit_quality_classifier, predict_quality_with_classifier, apply_abstract_threshold_cap
 from config import get_class_weights
 from image_processing import MeshQualityDataset
 from models import (
@@ -398,6 +402,16 @@ def train_one_fold(
     if len(valid_val_ids) != len(val_ids):
         print(f"  [WARNING] {len(val_ids) - len(valid_val_ids)} val IDs not found in CSV")
         val_ids = valid_val_ids
+
+    quality_model_payload = None
+    if USE_SEPARATE_QUALITY_MODEL and mesh_feat_train is not None:
+        quality_model_payload = fit_quality_classifier(
+            mesh_feat_train,
+            train_labels["quality"].values,
+            seed=SEED + fold,
+        )
+        if quality_model_payload is not None:
+            print("  [Quality] Fitted independent mesh-feature quality classifier.")
 
     # ── Compute class weights ──────────────────────────────────────────────
     if USE_DYNAMIC_CLASS_WEIGHTS:
@@ -781,7 +795,15 @@ def train_one_fold(
             epoch_val_loader = val_loader
             epoch_val_labels = val_labels
 
-        val_metrics = validate(model, epoch_val_loader, epoch_val_labels, DEVICE, is_moe=is_moe)
+        val_metrics = validate(
+            model,
+            epoch_val_loader,
+            epoch_val_labels,
+            DEVICE,
+            is_moe=is_moe,
+            quality_model=quality_model_payload,
+            quality_threshold=QUALITY_MODEL_THRESHOLD,
+        )
         if ema is not None:
             ema.restore(model, backup)
         val_f1 = val_metrics["f1_defects"]
@@ -821,6 +843,8 @@ def train_one_fold(
                     "scaler_state_dict": scaler.state_dict(),
                     "scaler_mean": scaler_3d.mean if scaler_3d else None,
                     "scaler_std": scaler_3d.std if scaler_3d else None,
+                    "quality_model": quality_model_payload,
+                    "quality_threshold": QUALITY_MODEL_THRESHOLD,
                 }
                 torch.save(checkpoint_payload, best_path)
                 
@@ -844,6 +868,8 @@ def train_one_fold(
                 "scaler_state_dict": scaler.state_dict(),
                 "scaler_mean": scaler_3d.mean if scaler_3d else None,
                 "scaler_std": scaler_3d.std if scaler_3d else None,
+                "quality_model": quality_model_payload,
+                "quality_threshold": QUALITY_MODEL_THRESHOLD,
             }
             torch.save(last_payload, last_path)
 
@@ -887,8 +913,13 @@ def train_one_fold(
     val_true = val_labels[DEFECT_COLS].values
     val_true_quality = val_labels["quality"].values
 
-    # v2.1: Quality-aware threshold optimization (optimizes f1_final directly)
-    if OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
+    if OPTIMIZE_THRESHOLDS and USE_SEPARATE_QUALITY_MODEL and quality_model_payload is not None:
+        print("  Using defect-only threshold optimization; quality is predicted independently.")
+        thresholds = optimize_thresholds(
+            val_true, val_proba, DEFECT_COLS,
+            search_range=(0.05, 0.95), steps=50,
+        )
+    elif OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
         print("  Using quality-aware threshold optimization (f1_final metric)...")
         thresholds = optimize_thresholds_f1_final(
             val_true, val_true_quality, val_proba, DEFECT_COLS,
@@ -901,6 +932,9 @@ def train_one_fold(
         )
     else:
         thresholds = np.full(len(DEFECT_COLS), 0.5)
+
+    if USE_SEPARATE_QUALITY_MODEL and quality_model_payload is not None:
+        thresholds = apply_abstract_threshold_cap(thresholds, ABSTRACT_THRESHOLD_MAX)
 
     # v2.1: Temperature scaling calibration
     temperature = 1.0
@@ -919,7 +953,13 @@ def train_one_fold(
                 val_proba = 1.0 / (1.0 + np.exp(-(val_logits / temperature)))
 
             # Re-optimize thresholds with temperature-scaled probabilities
-            if OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
+            if OPTIMIZE_THRESHOLDS and USE_SEPARATE_QUALITY_MODEL and quality_model_payload is not None:
+                thresholds = optimize_thresholds(
+                    val_true, val_proba, DEFECT_COLS,
+                    search_range=(0.05, 0.95), steps=50,
+                )
+                thresholds = apply_abstract_threshold_cap(thresholds, ABSTRACT_THRESHOLD_MAX)
+            elif OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
                 thresholds = optimize_thresholds_f1_final(
                     val_true, val_true_quality, val_proba, DEFECT_COLS,
                     search_range=(0.05, 0.95), steps=50,
@@ -929,7 +969,12 @@ def train_one_fold(
 
     val_pred = (val_proba >= thresholds).astype(int)
     val_pred_df = pd.DataFrame(val_pred, columns=DEFECT_COLS)
-    val_pred_df["quality"] = derive_quality(val_pred)
+    quality_pred, quality_proba = predict_quality_with_classifier(
+        quality_model_payload,
+        mesh_feat_val,
+        threshold=QUALITY_MODEL_THRESHOLD,
+    )
+    val_pred_df["quality"] = quality_pred if quality_pred is not None else derive_quality(val_pred)
     val_true_df = val_labels[DEFECT_COLS + ["quality"]].reset_index(drop=True)
 
     final_metrics = compute_f1_final(val_true_df, val_pred_df)
@@ -980,6 +1025,7 @@ def train_one_fold(
         "best_model_path": best_path,
         "val_idx": val_indices.tolist(),
         "val_proba": val_proba.tolist(),
+        "val_quality_proba": quality_proba.tolist() if quality_proba is not None else None,
     }
 
     result_path = os.path.join(log_dir, f"fold_{fold}_result.json")
@@ -996,11 +1042,20 @@ def _model_forward_simple(model, views, mesh_feat, pc, is_moe=False):
     return model(views, mesh_feat, pc)
 
 
-def validate(model, val_loader, val_labels_df, device, is_moe=False):
+def validate(
+    model,
+    val_loader,
+    val_labels_df,
+    device,
+    is_moe=False,
+    quality_model=None,
+    quality_threshold: float = 0.5,
+):
     """Validate model on validation set."""
     model.eval()
     all_proba = []
     all_labels = []
+    all_mesh_features = []
 
     device_type = "cuda" if "cuda" in device else "cpu"
 
@@ -1012,6 +1067,8 @@ def validate(model, val_loader, val_labels_df, device, is_moe=False):
                 batch["mesh_features"].to(device)
                 if batch["mesh_features"] is not None else None
             )
+            if mesh_feat is not None:
+                all_mesh_features.append(mesh_feat.detach().cpu().numpy())
             pc = (
                 batch.get("point_cloud").to(device)
                 if batch.get("point_cloud") is not None else None
@@ -1030,7 +1087,15 @@ def validate(model, val_loader, val_labels_df, device, is_moe=False):
     all_pred = (all_proba >= 0.5).astype(int)
 
     pred_df = pd.DataFrame(all_pred, columns=DEFECT_COLS)
-    pred_df["quality"] = derive_quality(all_pred)
+    quality_pred = None
+    if all_mesh_features:
+        quality_mesh = np.concatenate(all_mesh_features, axis=0)
+        quality_pred, _ = predict_quality_with_classifier(
+            quality_model,
+            quality_mesh,
+            threshold=quality_threshold,
+        )
+    pred_df["quality"] = quality_pred if quality_pred is not None else derive_quality(all_pred)
     true_df = val_labels_df[DEFECT_COLS + ["quality"]].reset_index(drop=True)
 
     metrics = compute_f1_final(true_df, pred_df)

@@ -128,8 +128,17 @@ LOSS_FUNCTION = (
     "quality_focal"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
 )
 FOCAL_GAMMA = 2.0  # Focal loss gamma
+FOCAL_WEIGHT_MAX = 5.0  # Clamp focal multiplier for rare-class stability
 FOCAL_ALPHA = None  # Auto-computed from class weights if None
 LABEL_SMOOTHING = 0.05
+
+# --- Rare-class structural corrections ---
+ABSTRACT_MESH_LOGIT_BOOST = 0.5  # Mesh-only abstract probability residual added to fused abstract logit
+USE_ABSTRACT_OVERSAMPLING = True
+ABSTRACT_OVERSAMPLE_PROB = 0.8
+USE_SEPARATE_QUALITY_MODEL = True
+QUALITY_MODEL_THRESHOLD = 0.5
+ABSTRACT_THRESHOLD_MAX = 0.15  # With separate quality, cap abstract threshold for recall
 
 # --- Optimizer ---
 OPTIMIZER = "adamw"  # Options: adamw, sgd

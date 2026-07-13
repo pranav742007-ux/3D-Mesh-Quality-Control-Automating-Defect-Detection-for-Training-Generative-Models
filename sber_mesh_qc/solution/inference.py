@@ -10,7 +10,7 @@ derives quality labels, and generates competition submission.csv.
 import config
 import os
 import json
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
@@ -41,6 +41,7 @@ from config import (
     USE_GRADIENT_NORMALS,
 )
 from utils import set_seed, derive_quality, safe_collate, clean_state_dict_keys
+from utils import predict_quality_with_classifier, apply_abstract_threshold_cap
 from image_processing import MeshQualityDataset, TTATransform
 from models import (
     MultiViewImageModel, MeshFeatureMLP, FusedEnsembleModel,
@@ -210,6 +211,12 @@ def ensemble_inference(
         thresholds = np.full(len(DEFECT_COLS), 0.5)
         print("Using default threshold 0.5 for all classes")
 
+    if getattr(config, "USE_SEPARATE_QUALITY_MODEL", False):
+        thresholds = apply_abstract_threshold_cap(
+            thresholds,
+            getattr(config, "ABSTRACT_THRESHOLD_MAX", None),
+        )
+
     # ── Grid for view splitting (Limitation #3) ───────────────────────────
     view_grid = None if AUTO_DETECT_GRID else VIEW_GRID
 
@@ -232,6 +239,7 @@ def ensemble_inference(
         )
 
     fold_proba_list = []
+    fold_quality_proba_list = []
 
     for fold in folds_to_use:
         checkpoint_path = os.path.join(checkpoint_dir, f"best_fold{fold}.pt")
@@ -300,6 +308,20 @@ def ensemble_inference(
         fold_proba = inference_with_tta(model, fold_test_loader, DEVICE, USE_TTA, temperature=temperature, effort=effort)
         fold_proba_list.append(fold_proba)
 
+        quality_model = ckpt.get("quality_model") if isinstance(ckpt, dict) else None
+        if quality_model is not None and fold_mesh_features is not None:
+            quality_threshold = float(ckpt.get(
+                "quality_threshold",
+                getattr(config, "QUALITY_MODEL_THRESHOLD", 0.5),
+            ))
+            _, fold_quality_proba = predict_quality_with_classifier(
+                quality_model,
+                fold_mesh_features,
+                threshold=quality_threshold,
+            )
+            if fold_quality_proba is not None:
+                fold_quality_proba_list.append(fold_quality_proba)
+
         # Free memory
         del model
         if "cuda" in DEVICE:
@@ -329,7 +351,15 @@ def ensemble_inference(
     predictions = (ensemble_proba >= thresholds).astype(int)
 
     # ── Derive quality ─────────────────────────────────────────────────────
-    quality = derive_quality(predictions)
+    quality_proba = None
+    if fold_quality_proba_list:
+        quality_proba = np.mean(fold_quality_proba_list, axis=0)
+        quality_threshold = float(getattr(config, "QUALITY_MODEL_THRESHOLD", 0.5))
+        quality = (quality_proba >= quality_threshold).astype(int)
+        print(f"  Quality predicted by {len(fold_quality_proba_list)} fold mesh classifiers")
+    else:
+        quality = derive_quality(predictions)
+        print("  [WARNING] No saved quality classifier found; using derived quality fallback")
 
     # ── Build submission DataFrame ─────────────────────────────────────────
     submission = pd.DataFrame(predictions, columns=DEFECT_COLS)
@@ -339,6 +369,8 @@ def ensemble_inference(
     # Also save probabilities for analysis
     proba_df = pd.DataFrame(ensemble_proba, columns=DEFECT_COLS)
     proba_df.insert(0, "item_id", test_ids)
+    if quality_proba is not None:
+        proba_df["quality_proba"] = quality_proba
 
     # ── Explainability & OOD (Phase 8 and Phase 3 Integration) ─────────────
     try:

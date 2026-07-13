@@ -351,14 +351,34 @@ class MeshQualityDataset(Dataset):
         # The old code did `labels_df[labels_df['item_id'] == item_id]` per item,
         # which is O(N) per __getitem__ call — ~16M comparisons per epoch.
         self._label_lookup = {}
+        self._abstract_indices = []
         if labels_df is not None:
             if 'item_id' in labels_df.columns:
                 for _, row in labels_df.iterrows():
-                    self._label_lookup[str(row['item_id'])] = row[self.defect_cols].values.astype(np.float32)
+                    label_values = row[self.defect_cols].values.astype(np.float32)
+                    self._label_lookup[str(row['item_id'])] = label_values
             else:
                 # Fallback: labels_df is already indexed by item_id
                 for idx_val in labels_df.index:
-                    self._label_lookup[str(idx_val)] = labels_df.loc[idx_val, self.defect_cols].values.astype(np.float32)
+                    label_values = labels_df.loc[idx_val, self.defect_cols].values.astype(np.float32)
+                    self._label_lookup[str(idx_val)] = label_values
+
+            for pos, item_id in enumerate(self.item_ids):
+                label_values = self._label_lookup.get(str(item_id))
+                if label_values is not None and label_values[0] == 1:
+                    self._abstract_indices.append(pos)
+
+        try:
+            import config as cfg
+            self.abstract_oversample = (
+                augment
+                and bool(getattr(cfg, "USE_ABSTRACT_OVERSAMPLING", False))
+                and len(self._abstract_indices) > 0
+            )
+            self.abstract_oversample_prob = float(getattr(cfg, "ABSTRACT_OVERSAMPLE_PROB", 0.0))
+        except Exception:
+            self.abstract_oversample = False
+            self.abstract_oversample_prob = 0.0
 
         # Base transforms (applied to each individual view)
         self.use_gradient_normals = aug_config.get("use_gradient_normals", False) if aug_config else False
@@ -384,6 +404,9 @@ class MeshQualityDataset(Dataset):
         return len(self.item_ids)
 
     def __getitem__(self, idx):
+        if self.abstract_oversample and np.random.random() < self.abstract_oversample_prob:
+            idx = int(np.random.choice(self._abstract_indices))
+
         item_id = self.item_ids[idx]
         safe_item_id = _sanitize_item_id(item_id)
 

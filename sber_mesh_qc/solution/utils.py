@@ -34,6 +34,80 @@ def set_seed(seed: int = 42):
         pass
 
 
+def fit_quality_classifier(mesh_features: np.ndarray, quality_targets: np.ndarray, seed: int = 42) -> Optional[dict]:
+    """
+    Fit a small independent quality classifier on scaled mesh features.
+
+    The returned payload is primitive numpy/list data so fold checkpoints do not
+    depend on pickle-loading sklearn estimator objects at inference time.
+    """
+    if mesh_features is None or quality_targets is None:
+        return None
+    X = np.asarray(mesh_features, dtype=np.float32)
+    y = np.asarray(quality_targets).astype(int)
+    if X.ndim != 2 or len(X) == 0 or len(X) != len(y):
+        return None
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    unique = np.unique(y)
+    if len(unique) < 2:
+        return {"type": "constant", "value": int(unique[0]) if len(unique) else 0}
+
+    from sklearn.linear_model import LogisticRegression
+
+    clf = LogisticRegression(
+        max_iter=1000,
+        class_weight="balanced",
+        solver="liblinear",
+        random_state=seed,
+    )
+    clf.fit(X, y)
+    return {
+        "type": "logreg",
+        "coef": clf.coef_.astype(np.float32),
+        "intercept": clf.intercept_.astype(np.float32),
+        "classes": clf.classes_.astype(int),
+    }
+
+
+def predict_quality_with_classifier(
+    quality_model: Optional[dict],
+    mesh_features: np.ndarray,
+    threshold: float = 0.5,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Return independent quality labels and probabilities from a saved payload."""
+    if quality_model is None or mesh_features is None:
+        return None, None
+    X = np.asarray(mesh_features, dtype=np.float32)
+    if X.ndim != 2 or len(X) == 0:
+        return None, None
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    model_type = quality_model.get("type")
+    if model_type == "constant":
+        value = int(quality_model.get("value", 0))
+        proba = np.full(len(X), float(value), dtype=np.float32)
+        return np.full(len(X), value, dtype=int), proba
+
+    if model_type != "logreg":
+        return None, None
+
+    coef = np.asarray(quality_model["coef"], dtype=np.float32).reshape(-1)
+    intercept = float(np.asarray(quality_model["intercept"], dtype=np.float32).reshape(-1)[0])
+    logits = X @ coef + intercept
+    proba = 1.0 / (1.0 + np.exp(-np.clip(logits, -50.0, 50.0)))
+    labels = (proba >= threshold).astype(int)
+    return labels, proba.astype(np.float32)
+
+
+def apply_abstract_threshold_cap(thresholds: np.ndarray, cap: Optional[float]) -> np.ndarray:
+    """Cap the abstract threshold while leaving the remaining defect thresholds intact."""
+    capped = np.asarray(thresholds, dtype=float).copy()
+    if cap is not None and len(capped) > 0:
+        capped[0] = min(float(capped[0]), float(cap))
+    return capped
+
+
 def compute_f1_final(y_true_df: pd.DataFrame, y_pred_df: pd.DataFrame) -> dict:
     """
     Compute the competition metric:
@@ -528,6 +602,5 @@ def clean_state_dict_keys(state_dict: dict, model: nn.Module) -> dict:
         return new_dict
 
     return state_dict
-
 
 

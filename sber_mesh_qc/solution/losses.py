@@ -192,7 +192,17 @@ def build_loss_function(
         return HybridFocalASLLoss(gamma_neg=4.0, gamma_pos=1.0, clip=0.05, label_smoothing=label_smoothing, reduction=reduction)
     
     elif loss_name == "quality_focal":
-        return QualityAwareHardDefectFocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing, reduction=reduction)
+        try:
+            import config as cfg
+            focal_weight_max = getattr(cfg, "FOCAL_WEIGHT_MAX", 5.0)
+        except Exception:
+            focal_weight_max = 5.0
+        return QualityAwareHardDefectFocalLoss(
+            gamma=focal_gamma,
+            label_smoothing=label_smoothing,
+            reduction=reduction,
+            focal_weight_max=focal_weight_max,
+        )
     
     else:
         raise ValueError(f"Unknown loss: {loss_name}")
@@ -252,12 +262,20 @@ class QualityAwareHardDefectFocalLoss(nn.Module):
     Dynamically reweights loss gradients by focusing extra penalty on false negative predictions
     that directly ruin the competition quality label (quality = 1 iff ALL 10 defects = 0).
     """
-    def __init__(self, gamma: float = 2.5, quality_boost: float = 2.0, label_smoothing: float = 0.05, reduction: str = "mean"):
+    def __init__(
+        self,
+        gamma: float = 2.5,
+        quality_boost: float = 2.0,
+        label_smoothing: float = 0.05,
+        reduction: str = "mean",
+        focal_weight_max: float = 5.0,
+    ):
         super().__init__()
         self.gamma = gamma
         self.quality_boost = quality_boost
         self.label_smoothing = label_smoothing
         self.reduction = reduction
+        self.focal_weight_max = focal_weight_max
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor, reduction: str = None) -> torch.Tensor:
         if self.label_smoothing > 0:
@@ -270,6 +288,7 @@ class QualityAwareHardDefectFocalLoss(nn.Module):
         probs = torch.sigmoid(logits)
         p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
         focal_weight = (1.0 - p_t) ** self.gamma
+        focal_weight = torch.clamp(focal_weight, max=self.focal_weight_max)
 
         # Hard Defect Mining Weight: Boost weight if sample has defect (target > 0) but model missed it (p < 0.5)
         fn_mask = (targets > 0.5) & (probs < 0.5)

@@ -842,6 +842,7 @@ class FusedEnsembleModel(nn.Module):
         pointnet_model: nn.Module = None,
         pointnet_weight: float = 0.15,
         use_gradient_checkpointing: bool = False,
+        abstract_mesh_logit_boost: float = 0.5,
     ):
         super().__init__()
         self.image_model = image_model
@@ -853,6 +854,7 @@ class FusedEnsembleModel(nn.Module):
         self.pointnet_weight = pointnet_weight
         self.num_classes = 10
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.abstract_mesh_logit_boost = abstract_mesh_logit_boost
 
         n_branches = 3 if pointnet_model is not None else 2
 
@@ -876,6 +878,18 @@ class FusedEnsembleModel(nn.Module):
             self.fusion_head = nn.Linear(64, self.num_classes)
         elif fusion_method == "gated":
             self.gated_fusion = GatedModalityFusion(d_model=self.num_classes, num_modalities=n_branches)
+
+    def _apply_abstract_mesh_boost(
+        self,
+        fused_logits: torch.Tensor,
+        mesh_logits: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if mesh_logits is None or self.abstract_mesh_logit_boost <= 0:
+            return fused_logits
+        fused_logits = fused_logits.clone()
+        abstract_boost = torch.sigmoid(mesh_logits[:, 0]) * self.abstract_mesh_logit_boost
+        fused_logits[:, 0] = fused_logits[:, 0] + abstract_boost
+        return fused_logits
 
     def forward(
         self,
@@ -918,13 +932,14 @@ class FusedEnsembleModel(nn.Module):
             fused_probs = sum(w * p for w, p in probs_list)
             fused_probs = fused_probs.clamp(min=1e-7, max=1.0 - 1e-7)
             fused_logits = torch.log(fused_probs / (1.0 - fused_probs))
-            return fused_logits
+            return self._apply_abstract_mesh_boost(fused_logits, mesh_logits if mesh_features is not None else None)
 
         elif self.fusion_method == "concat_mlp":
             total_w = sum(w for w, _ in probs_list)
             probs_list = [(w / total_w, p) for w, p in probs_list]
             concat = torch.cat([p for _, p in probs_list], dim=1)
-            return self.fusion_mlp(concat)
+            fused_logits = self.fusion_mlp(concat)
+            return self._apply_abstract_mesh_boost(fused_logits, mesh_logits if mesh_features is not None else None)
 
         elif self.fusion_method == "gated":
             m_p = mesh_probs if mesh_probs is not None else torch.zeros_like(image_probs)
@@ -932,10 +947,10 @@ class FusedEnsembleModel(nn.Module):
             if self.pointnet_model is not None:
                 fused_probs = self.gated_fusion(image_probs, m_p, p_p)
             else:
-                fused_probs = self.gated_fusion(image_probs, m_p)
+            fused_probs = self.gated_fusion(image_probs, m_p)
             fused_probs = fused_probs.clamp(min=1e-7, max=1.0 - 1e-7)
             fused_logits = torch.log(fused_probs / (1.0 - fused_probs))
-            return fused_logits
+            return self._apply_abstract_mesh_boost(fused_logits, mesh_logits if mesh_features is not None else None)
 
         elif self.fusion_method == "transformer":
             img_token = self.img_prob_proj(image_probs).unsqueeze(1)
@@ -952,7 +967,8 @@ class FusedEnsembleModel(nn.Module):
             
             seq = torch.cat(tokens, dim=1)
             fused = self.fusion_transformer(seq)
-            return self.fusion_head(fused[:, 0, :])
+            fused_logits = self.fusion_head(fused[:, 0, :])
+            return self._apply_abstract_mesh_boost(fused_logits, mesh_logits if mesh_features is not None else None)
 
         else:
             raise ValueError(f"Unknown fusion method: {self.fusion_method}")
@@ -1986,6 +2002,7 @@ def build_model_from_config(cfg=None, effective_mesh_dim: int = 68) -> nn.Module
             mesh_weight=getattr(cfg, "FUSION_MESH_WEIGHT", 0.3),
             pointnet_model=pointnet_model,
             pointnet_weight=getattr(cfg, "POINTNET_WEIGHT", 0.1),
+            abstract_mesh_logit_boost=getattr(cfg, "ABSTRACT_MESH_LOGIT_BOOST", 0.5),
         )
 
     # 2. Wrap model if USE_EARLY_EXIT is enabled

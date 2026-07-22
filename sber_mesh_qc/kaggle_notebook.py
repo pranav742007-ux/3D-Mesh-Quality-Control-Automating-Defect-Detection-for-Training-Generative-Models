@@ -25,9 +25,10 @@ KAGGLE-SPECIFIC ADAPTATIONS:
 # ── CELL 1: Environment Setup & Dependency Installation
 # ══════════════════════════════════════════════════════════════════════════════
 
-import subprocess
 import sys
 import os
+sys.path.insert(0, '/kaggle/working/solution')
+import config as cfg
 
 print("=" * 60)
 print("  CELL 1: ENVIRONMENT SETUP")
@@ -244,23 +245,20 @@ config.TEST_CSV = test_csv_path
 # 4. SEQUENTIAL_VIEW_PROCESSING=False: Only enable if you get OOM errors.
 #    Trades ~20% speed for ~40% VRAM savings.
 
-config.USE_MOE = False          # Single backbone = safer on T4
-config.BATCH_SIZE = 8           # Safe for T4
-config.NUM_WORKERS = 2          # Kaggle shm limit
-config.GRADIENT_ACCUM_STEPS = 4 # Effective batch = 32
-config.NUM_FOLDS = 3            # 3-fold CV (faster than 5)
-config.NUM_EPOCHS = 20          # Full training
-config.USE_POINTNET_BRANCH = False  # Disable PointNet (saves VRAM)
-config.USE_EXTENDED_FEATURES = True # Use 68-dim features
-config.PROGRESSIVE_RESIZE = True    # Speed optimization
-config.MIXED_PRECISION = True       # FP16 for speed + memory
-
-print("\n✓ Configuration overrides applied for Kaggle T4")
-print(f"  Architecture: Single backbone ({config.IMAGE_BACKBONE})")
-print(f"  Batch size: {config.BATCH_SIZE} × {config.GRADIENT_ACCUM_STEPS} accumulation = {config.BATCH_SIZE * config.GRADIENT_ACCUM_STEPS} effective")
-print(f"  Folds: {config.NUM_FOLDS}, Epochs: {config.NUM_EPOCHS}")
-print(f"  Mixed precision: {config.MIXED_PRECISION}")
-print(f"  Extended features (68-dim): {config.USE_EXTENDED_FEATURES}")
+# Overrides disabled — config.py is the sole source of truth
+print("=" * 60)
+print(f"config file path: {config.__file__}")
+print(f"CONFIG_VERSION: {getattr(config, 'CONFIG_VERSION', 'N/A')}")
+print(f"IMAGE_BACKBONE: {config.IMAGE_BACKBONE}")
+print(f"IMAGE_IN_CHANNELS: {config.IMAGE_IN_CHANNELS}")
+print(f"USE_IMAGE_BRANCH: {getattr(config, 'USE_IMAGE_BRANCH', 'N/A')}")
+print(f"USE_MESH_BRANCH: {getattr(config, 'USE_MESH_BRANCH', 'N/A')}")
+print(f"USE_GEOMETRY_RASTER: {getattr(config, 'USE_GEOMETRY_RASTER', 'N/A')}")
+print(f"USE_GRADIENT_NORMALS: {getattr(config, 'USE_GRADIENT_NORMALS', 'N/A')}")
+print(f"effective feature dimension: {getattr(config, 'MESH_FEATURE_DIM', 'N/A')}")
+print(f"NUM_FOLDS: {config.NUM_FOLDS}")
+print(f"DEFECT_COLS: {config.DEFECT_COLS}")
+print("=" * 60)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

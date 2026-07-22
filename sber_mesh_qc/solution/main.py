@@ -133,7 +133,7 @@ def step_extract_features(data_dir, base_dir, extended=True):
     train_df = pd.read_csv(train_csv)
     train_df = train_df.rename(columns=lambda x: x.replace("OUTPUT:", ""))
     train_ids = [str(x) for x in train_df["item_id"].tolist()]
-    expected_train_dim = 100 if extended else 58
+    expected_train_dim = 103 if extended else 58
 
     def _validate_and_load_cache(cache_path: str, expected_ids: list, expected_dim: int) -> Optional[np.ndarray]:
         if not os.path.isfile(cache_path):
@@ -141,10 +141,10 @@ def step_extract_features(data_dir, base_dir, extended=True):
         try:
             if cache_path.endswith(".npz"):
                 data = np.load(cache_path, allow_pickle=False)
-                if "features" not in data or "item_ids" not in data:
+                if "features" not in data:
                     return None
                 feats = data["features"]
-                cached_ids = [str(x) for x in data["item_ids"]]
+                cached_ids = [str(x) for x in data["item_ids"]] if "item_ids" in data else expected_ids
             else:
                 ids_path = cache_path.replace(".npy", "_ids.npy")
                 if not os.path.isfile(ids_path):
@@ -165,14 +165,11 @@ def step_extract_features(data_dir, base_dir, extended=True):
             return None
 
     # --- Train features ---
-    if cache_format == "mmap":
-        found_train = _find_cache_file(train_cache_name, base_dir, data_dir) or \
-                      _find_cache_file("mesh_features_train_extended.npy", base_dir, data_dir) or \
-                      _find_cache_file("mesh_features_train.npy", base_dir, data_dir)
-    else:
-        found_train = _find_cache_file(train_cache_name, base_dir, data_dir) or \
-                      _find_cache_file("mesh_features_train_extended.npz", base_dir, data_dir) or \
-                      _find_cache_file("mesh_features_train.npz", base_dir, data_dir)
+    found_train = _find_cache_file(train_cache_name, base_dir, data_dir) or \
+                  _find_cache_file("mesh_features_train_extended.npy", base_dir, data_dir) or \
+                  _find_cache_file("mesh_features_train_extended.npz", base_dir, data_dir) or \
+                  _find_cache_file("mesh_features_train.npy", base_dir, data_dir) or \
+                  _find_cache_file("mesh_features_train.npz", base_dir, data_dir)
 
     train_features = _validate_and_load_cache(found_train, train_ids, expected_train_dim) if found_train else None
 
@@ -205,14 +202,11 @@ def step_extract_features(data_dir, base_dir, extended=True):
     test_ids = [str(x) for x in test_df["item_id"].tolist()]
     expected_test_dim = expected_train_dim
 
-    if cache_format == "mmap":
-        found_test = _find_cache_file(test_cache_name, base_dir, data_dir) or \
-                     _find_cache_file("mesh_features_test_extended.npy", base_dir, data_dir) or \
-                     _find_cache_file("mesh_features_test.npy", base_dir, data_dir)
-    else:
-        found_test = _find_cache_file(test_cache_name, base_dir, data_dir) or \
-                     _find_cache_file("mesh_features_test_extended.npz", base_dir, data_dir) or \
-                     _find_cache_file("mesh_features_test.npz", base_dir, data_dir)
+    found_test = _find_cache_file(test_cache_name, base_dir, data_dir) or \
+                 _find_cache_file("mesh_features_test_extended.npy", base_dir, data_dir) or \
+                 _find_cache_file("mesh_features_test_extended.npz", base_dir, data_dir) or \
+                 _find_cache_file("mesh_features_test.npy", base_dir, data_dir) or \
+                 _find_cache_file("mesh_features_test.npz", base_dir, data_dir)
 
     test_features = _validate_and_load_cache(found_test, test_ids, expected_test_dim) if found_test else None
 
@@ -304,7 +298,7 @@ def step_extract_point_clouds(data_dir, base_dir, num_points=1024):
     return train_pcs, test_pcs
 
 
-def step_train(train_features, data_dir, checkpoint_dir, log_dir, point_clouds=None):
+def step_train(train_features, data_dir, checkpoint_dir, log_dir, point_clouds=None, base_dir=None):
     """Step 3: Train CV ensemble.
 
     v2.0: Passes point_clouds for optional PointNet branch.
@@ -312,6 +306,17 @@ def step_train(train_features, data_dir, checkpoint_dir, log_dir, point_clouds=N
     print("\n" + "=" * 60)
     print("  STEP 3: TRAINING CV ENSEMBLE")
     print("=" * 60)
+
+    import config
+    if train_features is None:
+        print("  [Auto-Repair] Mesh features not loaded. Extracting now...")
+        resolved_base_dir = base_dir if base_dir is not None else "."
+        train_features, _ = step_extract_features(data_dir, resolved_base_dir, extended=config.USE_EXTENDED_FEATURES)
+
+    if config.USE_POINTNET_BRANCH and point_clouds is None:
+        print("  [Auto-Repair] PointNet enabled but point clouds not loaded. Extracting now...")
+        resolved_base_dir = base_dir if base_dir is not None else "."
+        point_clouds, _ = step_extract_point_clouds(data_dir, resolved_base_dir, num_points=config.POINTNET_NUM_POINTS)
 
     from train import train_full_cv
 
@@ -363,6 +368,17 @@ def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path
     print("  STEP 4: INFERENCE + SUBMISSION GENERATION")
     print("=" * 60)
 
+    import config
+    if test_features is None:
+        print("  [Auto-Repair] Mesh features not loaded. Extracting now...")
+        resolved_base_dir = base_dir if base_dir is not None else "."
+        _, test_features = step_extract_features(data_dir, resolved_base_dir, extended=config.USE_EXTENDED_FEATURES)
+
+    if config.USE_POINTNET_BRANCH and point_clouds is None:
+        print("  [Auto-Repair] PointNet enabled but point clouds not loaded. Extracting now...")
+        resolved_base_dir = base_dir if base_dir is not None else "."
+        _, point_clouds = step_extract_point_clouds(data_dir, resolved_base_dir, num_points=config.POINTNET_NUM_POINTS)
+
     from inference import generate_submission
 
     test_csv = os.path.join(data_dir, "test.csv")
@@ -403,7 +419,8 @@ def step_infer(test_features, data_dir, checkpoint_dir, log_dir, submission_path
         try:
             print("\n  [Drift Monitor] Running Production Feature Drift check...")
             train_feats = np.load(found_train)
-            drift_report = monitor_feature_drift(train_feats, test_features, cfg.FEATURE_ORDER if cfg.USE_EXTENDED_FEATURES else cfg.FEATURE_ORDER[:58])
+            from mesh_features import FEATURE_ORDER
+            drift_report = monitor_feature_drift(train_feats, test_features, FEATURE_ORDER if cfg.USE_EXTENDED_FEATURES else FEATURE_ORDER[:58])
             drift_report_path = os.path.join(log_dir, "drift_report.json")
             with open(drift_report_path, "w") as f_drift:
                 json.dump(drift_report, f_drift, indent=2)

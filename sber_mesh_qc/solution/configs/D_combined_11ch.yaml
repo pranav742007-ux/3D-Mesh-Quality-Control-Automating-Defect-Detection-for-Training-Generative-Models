@@ -1,0 +1,9 @@
+# D: RGB + Mesh + Sobel + true raster (11-ch)
+USE_IMAGE_BRANCH: true
+USE_MESH_BRANCH: true
+USE_GEOMETRY_RASTER: true
+USE_GRADIENT_NORMALS: true
+NUM_FOLDS: 5
+NUM_EPOCHS: 25
+BATCH_SIZE: 16
+FUSION_METHOD: "late_average"

@@ -70,9 +70,7 @@ VIEW_GRID = (3, 2)  # Grid layout: 3 rows x 2 cols
 # ──────────────────────────── MESH FEATURE SETTINGS ──────────────────────────
 # Geometric features extracted from .npz (vertices + faces)
 MESH_FEATURE_DIM = 58  # Original hand-crafted features (backward compat)
-MESH_FEATURE_DIM_EXTENDED = (
-    103  # Extended SOTA features (68 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics)
-)
+MESH_FEATURE_DIM_EXTENDED = 103  # Extended SOTA features (68 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics)
 USE_EXTENDED_FEATURES = True  # Set True to use 100-dim features
 USE_SPHERICAL_HARMONICS = True  # 25 Cartesian Spherical Harmonics Descriptors (l=0..4)
 USE_BETTI_NUMBERS = True  # DSU Topological Persistence Invariants (beta_0, beta_1, chi)
@@ -81,7 +79,7 @@ USE_RECONSTRUCTION_AUX = True  # Feature-space 3D Reconstruction Aux Loss
 # ──────────────────────────── POINTNET BRANCH (Limitation #1) ───────────────
 # Lightweight learned 3D features from raw point clouds.
 # Complements hand-crafted features by capturing complex geometric patterns.
-USE_POINTNET_BRANCH = False  # Set True to enable 3-branch fusion
+USE_POINTNET_BRANCH = False  # Enable only after the fused baseline wins an OOF ablation.
 POINTNET_NUM_POINTS = 1024  # Points sampled per mesh (memory vs quality)
 POINTNET_DROPOUT = 0.3
 POINTNET_WEIGHT = 0.15  # Fusion weight for PointNet branch
@@ -103,7 +101,7 @@ MESH_HIDDEN_DIMS = [256, 128, 64]  # MLP hidden layers
 MESH_DROPOUT = 0.3
 
 # --- Fusion ---
-FUSION_METHOD = "transformer"  # 'late_average', 'concat_mlp', or 'transformer'
+FUSION_METHOD = "late_average"  # 'late_average', 'concat_mlp', or 'transformer'
 FUSION_IMAGE_WEIGHT = 0.75  # Weight for image branch in late_average
 FUSION_MESH_WEIGHT = 0.25  # Weight for mesh branch
 
@@ -125,7 +123,7 @@ CLASS_WEIGHTS = None  # Will be computed as {class: weight}
 
 # --- Loss Function ---
 LOSS_FUNCTION = (
-    "quality_focal"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
+    "asl"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
 )
 FOCAL_GAMMA = 2.0  # Focal loss gamma
 FOCAL_WEIGHT_MAX = 5.0  # Clamp focal multiplier for rare-class stability
@@ -133,12 +131,45 @@ FOCAL_ALPHA = None  # Auto-computed from class weights if None
 LABEL_SMOOTHING = 0.05
 
 # --- Rare-class structural corrections ---
-ABSTRACT_MESH_LOGIT_BOOST = 0.5  # Mesh-only abstract probability residual added to fused abstract logit
-USE_ABSTRACT_OVERSAMPLING = True
+ABSTRACT_MESH_LOGIT_BOOST = 0.0  # Enable only after an OOF ablation proves benefit.
+USE_ABSTRACT_OVERSAMPLING = False
 ABSTRACT_OVERSAMPLE_PROB = 0.8
-USE_SEPARATE_QUALITY_MODEL = True
+
+# --- Rare-class structural corrections (default OFF to preserve current behavior) ---
+# Oversample defect-positive items for better rare-class gradient signal.
+USE_ARTIFACTS_OVERSAMPLING = False
+ARTIFACTS_OVERSAMPLE_PROB = 0.8
+
+USE_INTERSECTION_OVERSAMPLING = False
+INTERSECTION_OVERSAMPLE_PROB = 0.8
+
+# Mesh-only residual logit boosts applied at fusion time for specified defect classes.
+# Example: ["artifacts", "intersection"].
+USE_MESH_RESIDUAL_BOOST = False
+MESH_RESIDUAL_BOOST_CLASS_NAMES = []  # default: disabled
+MESH_RESIDUAL_BOOST_LOGIT_SCALE = 0.5
+
+# Optional per-class focal gamma. By default, uses the scalar FOCAL_GAMMA.
+ENABLE_PER_CLASS_FOCAL_GAMMA = False
+# If enabled, this vector should be length == len(DEFECT_COLS).
+# When None, defaults to using scalar FOCAL_GAMMA for all classes.
+PER_CLASS_FOCAL_GAMMA = None
+# Convenience override for intersection focal gamma only (if set, used even when vector is None).
+INTERSECTION_FOCAL_GAMMA = None
+
+# Deterministic inference-time geometric prior for intersection class.
+ENABLE_INTERSECTION_INFERENCE_GEOPRIOR = False
+INTERSECTION_INFERENCE_BOOST = 0.35
+# MeshValidityAnalyzer report key to use as prior signal.
+# Must exist in `MeshValidityAnalyzer.analyze_mesh(...)` output.
+INTERSECTION_PRIOR_FEATURE = "non_manifold_edge_count"
+INTERSECTION_PRIOR_SCALE = 0.02
+
+USE_SEPARATE_QUALITY_MODEL = False
 QUALITY_MODEL_THRESHOLD = 0.5
-ABSTRACT_THRESHOLD_MAX = 0.15  # With separate quality, cap abstract threshold for recall
+ABSTRACT_THRESHOLD_MAX = (
+    None  # Remove cap and let threshold optimizer find the true optimal point
+)
 
 # --- Optimizer ---
 OPTIMIZER = "adamw"  # Options: adamw, sgd
@@ -146,7 +177,7 @@ SCHEDULER = "cosine_warmup"  # Options: cosine_warmup, cosine, step, plateau
 WARMUP_EPOCHS = 3
 
 # ──────────────────────────── AUGMENTATION ───────────────────────────────────
-USE_AUGMENTATION = True
+USE_AUGMENTATION = False  # Enable one augmentation family at a time after baseline CV.
 AUG_PROB = 0.5
 AUG_HORIZONTAL_FLIP = True
 AUG_VERTICAL_FLIP = False  # Don't flip vertically (3D views)
@@ -167,7 +198,7 @@ AUTO_DETECT_GRID = True  # Auto-detect PNG grid layout (vs fixed 3x2)
 # Keys are epoch thresholds: "at epoch X, switch to this size".
 # Schedule goes SMALL → LARGE (the standard progressive resize pattern).
 PROGRESSIVE_RESIZE = True
-PROGRESSIVE_SCHEDULE = {0: 192, 6: 224}  # epoch -> image_size
+PROGRESSIVE_SCHEDULE = {0: 192, 6: 256}  # epoch -> image_size
 
 # ──────────────────────────── MEMORY OPTIMIZATIONS (Limitation #5) ────────
 # Gradient checkpointing: trade compute for memory
@@ -175,13 +206,15 @@ USE_GRADIENT_CHECKPOINTING = False  # Enable if OOM on T4
 # Sequential view processing: process one view at a time (saves VRAM, slower)
 SEQUENTIAL_VIEW_PROCESSING = False  # Enable if 6 simultaneous views OOM
 # View subsampling: use fewer views during training (all 6 at inference)
-VIEWS_TRAIN_SUBSAMPLE = 4  # e.g., 4 means randomly pick 4 of 6 views per item
+# Keep the training/inference view contract identical for the baseline.
+# View subsampling is an experiment, not a default score path.
+VIEWS_TRAIN_SUBSAMPLE = None
 GRADIENT_ACCUM_STEPS = 4  # Effective batch = BATCH_SIZE * this = 32
 # Mixed precision
 MIXED_PRECISION = True  # FP16 training (AMP)
 
 # ──────────────────────────── INFERENCE ───────────────────────────────────────
-USE_TTA = True  # Test-Time Augmentation for inference
+USE_TTA = False  # Test-Time Augmentation for inference
 TTA_FLIPS = [True, False]
 TTA_ROTATIONS = [0, 180]  # 4 TTA variants (speed/accuracy tradeoff)
 TTA_FAST_FLIPS = [False]  # Faster: no flips
@@ -204,7 +237,7 @@ EMA_DECAY = 0.999  # Higher = smoother averaging (0.999 = ~1000 steps)
 # ──────────────────────────── SWA (v2.1 SCORE TRICK) ───────────────────────
 # Stochastic Weight Averaging: average model weights over last N epochs.
 # Complementary to EMA — use ONE of them (prefer EMA for this task size).
-USE_SWA = True  # Enable SWA (Grandmaster Phase 3)
+USE_SWA = False  # Enable SWA (Grandmaster Phase 3)
 SWA_START_EPOCH = 15  # Start averaging with ~5 epochs left
 SWA_LR = 5e-5  # Very low LR for SWA phase
 
@@ -212,7 +245,7 @@ SWA_LR = 5e-5  # Very low LR for SWA phase
 # ──────────────────────────── MIXUP (v2.1 SCORE TRICK) ─────────────────────
 # Multi-label mixup: blend images and soft labels for better generalization.
 # Proven to improve F1 by 0.5-1.5% on imbalanced multi-label tasks.
-USE_MIXUP = True
+USE_MIXUP = False
 MIXUP_ALPHA = 0.2  # Beta distribution alpha (0.2 = mild mixing)
 MIXUP_PROB = 0.3  # Probability of applying mixup per batch
 MIXUP_LABEL_SMOOTH = 0.1  # Additional label smoothing for mixed samples
@@ -329,7 +362,7 @@ SAVE_LAST_MODEL = True
 WANDB_PROJECT = None  # Set to string to enable W&B logging
 
 # ──────────────────────────── v4.1 RISK-CONTROLLED ARCHITECTURE CONFIGS ──────
-USE_CROSS_VIEW_TRANSFORMER = True  # Enable Cross-View Transformer Fusion
+USE_CROSS_VIEW_TRANSFORMER = False  # Enable only after the simple fusion baseline is measured.
 TRANSFORMER_EMBED_DIM = 256  # d_model=256 (overfitting control)
 TRANSFORMER_DEPTH = 2
 TRANSFORMER_HEADS = 4
@@ -348,14 +381,19 @@ USE_HIERARCHICAL_HEAD = True  # Enable Soft Zero-Initialized Hierarchy (alpha=0,
 USE_EXPERT_HEADS = False  # Enable Defect Domain Experts
 
 USE_MULTI_SAMPLE_DROPOUT = True  # Enable Multi-Sample Dropout (MSDO)
-USE_OHEM = True  # Enable Online Hard Example Mining (OHEM)
+USE_OHEM = False  # Enable Online Hard Example Mining (OHEM)
 USE_CLEAN_SHIELD = True  # Enable Clean Mesh Shield Loss
 # EMA is already enabled above.  Do not combine it with SWA by default: the
 # two averaging schemes need a validation comparison before either replaces a
 # selected checkpoint.
-USE_GRADIENT_NORMALS = False  # Enable 6-channel Sobel pseudo-normals
+# Input branches and geometry-channel contract.  IMAGE_IN_CHANNELS is derived
+# below and must never be overridden independently.
+USE_IMAGE_BRANCH = True
+USE_MESH_BRANCH = True
+USE_GEOMETRY_RASTER = False
+USE_GRADIENT_NORMALS = False
 USE_CROSS_MODAL_ATTENTION = False  # Enable Bi-Directional Image <-> Geometry Attention
-IMAGE_IN_CHANNELS = 8  # 3ch RGB + 5ch Upgraded CPU Geometry Renders (Depth, normals, mask)
+IMAGE_IN_CHANNELS = 3 + (3 if USE_GRADIENT_NORMALS else 0) + (5 if USE_GEOMETRY_RASTER else 0)
 ABLATION_LOG_FILE = "logs/ablation_results.csv"
 
 # ──────────────────────────── v7.2 FRONTIER EXPERIMENTAL CONFIGS ───────────────
@@ -365,7 +403,7 @@ USE_KIMI_LATENT_MEMORY = False  # Enable Kimi K1.5 Latent Memory Compressor
 USE_GLM_SPATIAL_ALIGNER = False  # Enable GLM-5.2 Image Spatial Aligner
 USE_XAI_ROUTER = False  # Enable xAI Grok-3 MoE Dynamic Gated Router
 USE_FLEXIBLE_EFFORT = False  # Enable FlexibleThinkingEffortController
-USE_KIMI_DPO_LOSS = False  # Enable Kimi Quality Preference DPO Loss
+USE_KIMI_DPO_LOSS = False  # Experimental; keep disabled until it wins an OOF ablation.
 USE_OMNI_ROUTE = False  # Enable OmniRoute Dynamic Path Dispatcher
 USE_EARLY_EXIT = (
     False  # Requires a separately calibrated router; disabled for score runs
@@ -373,25 +411,21 @@ USE_EARLY_EXIT = (
 EARLY_EXIT_THRESHOLD = 0.95  # Early exit confidence threshold
 
 # Heterogeneous CV Backbones (One per fold)
-HETERO_CV_BACKBONES = [
-    "convnext_tiny",  # Fold 0: Excellent for local textures
-    "efficientnetv2_s",  # Fold 1: Best speed/accuracy, global structure
-    "resnet50",  # Fold 2: Strong edge/contour detection
-    "efficientnet_b3",  # Fold 3: Higher capacity, fine details
-    "convnext_tiny",  # Fold 4: Duplicate best performer for weight
-]
+# Empty means every fold uses IMAGE_BACKBONE.  Heterogeneous folds require
+# per-fold checkpoint metadata and are deliberately opt-in.
+HETERO_CV_BACKBONES = []
 
 # ──────────────────────────── PERFORMANCE CONFIGS ──────────────────────────────
 USE_NUMBA = True  # Enable Numba JIT Compilation for heavy math
 FEATURE_CACHE_FORMAT = "mmap"  # Cache format: "mmap" (.npy) or "npz" (.npz)
 OFFLINE_AUGMENT = False  # Enable generating augmented meshes offline
-PREPROCESS_IMAGES_OFFLINE = True  # Pre-crop and pre-resize rendered view grids offline
+PREPROCESS_IMAGES_OFFLINE = False  # Avoid stale preprocessed tensors during contract validation.
 USE_KORNIA = False  # Enable GPU-accelerated transforms via kornia
 USE_TORCH_COMPILE = False  # Enable torch.compile for model optimization
-VAL_SUBSAMPLE_RATIO = 0.5  # Fraction of validation set to evaluate per epoch (0.2 is too noisy for checkpoint selection)
+VAL_SUBSAMPLE_RATIO = 1.0  # MUST evaluate full validation for stable checkpoint selection
 # An unvalidated post-processing heuristic must never silently alter calibrated
 # probabilities. Turn it on only after demonstrating an OOF improvement.
-USE_GEOMETRIC_SAFETY_NET = True
+USE_GEOMETRIC_SAFETY_NET = False
 # NOTE: NUM_WORKERS is defined once above (line ~293). Do NOT redefine here.
 
 
@@ -407,8 +441,8 @@ def get_class_weights(train_df):
     for col in DEFECT_COLS:
         pos_count = train_df[col].sum()
         neg_count = len(train_df) - pos_count
-        # Use sqrt of inverse frequency to avoid extreme weights
-        weights[col] = np.sqrt(neg_count / max(pos_count, 1))
+        # Use sqrt of inverse frequency to avoid extreme weights, clamped to [1.0, 5.0]
+        weights[col] = np.clip(np.sqrt(neg_count / max(pos_count, 1)), 1.0, 5.0)
     return weights
 
 
@@ -418,6 +452,7 @@ def load_yaml_config(yaml_path: str):
     """
     import yaml
     import os
+
     if not os.path.exists(yaml_path):
         print(f"[Config] YAML file not found: {yaml_path}. Skipping.")
         return
@@ -426,4 +461,82 @@ def load_yaml_config(yaml_path: str):
     if cfg_dict:
         for k, v in cfg_dict.items():
             globals()[k] = v
+            
+        # Re-derive channel count to maintain contract
+        globals()["IMAGE_IN_CHANNELS"] = (
+            3
+            + (3 if globals().get("USE_GRADIENT_NORMALS", False) else 0)
+            + (5 if globals().get("USE_GEOMETRY_RASTER", False) else 0)
+        )
+            
+        validate_config()
         print(f"[Config] Successfully loaded overrides from: {yaml_path}")
+
+
+# ============================================================
+# Intersection & Rare Defect Structural Corrections
+# ============================================================
+
+# Oversampling for intersection (index 2)
+INTERSECTION_OVERSAMPLING = False
+INTERSECTION_OVERSAMPLE_PROB = 0.8
+
+# Oversampling for artifacts (index 1)
+ARTIFACTS_OVERSAMPLING = False
+ARTIFACTS_OVERSAMPLE_PROB = 0.8
+
+# Per-class focal gamma (vector)
+PER_CLASS_GAMMA = False
+GAMMA_VALUES = [3.5, 3.0, 6.0, 4.0, 1.5, 1.0, 5.0, 5.5, 3.0, 1.0]
+
+# Inference-time hard geometric prior for intersection
+ENABLE_INTERSECTION_INFERENCE_GEOPRIOR = False
+INTERSECTION_GEOPRIOR_THRESHOLD = 0.95
+
+# Mesh residual boost for multiple defect classes
+USE_MESH_RESIDUAL_BOOST = False
+MESH_RESIDUAL_BOOST_CLASS_NAMES = []
+MESH_RESIDUAL_BOOST_LOGIT_SCALE = 0.5
+
+# Manual threshold overrides
+OVERRIDE_THRESHOLDS = False
+MANUAL_THRESHOLD_OVERRIDES = {}
+
+
+def validate_config():
+    """Validate the image/geometry and branch contracts before a run starts."""
+    expected_channels = (
+        3
+        + (3 if USE_GRADIENT_NORMALS else 0)
+        + (5 if USE_GEOMETRY_RASTER else 0)
+    )
+    if not (USE_IMAGE_BRANCH or USE_MESH_BRANCH):
+        raise ValueError("At least one of USE_IMAGE_BRANCH or USE_MESH_BRANCH must be enabled.")
+    if IMAGE_IN_CHANNELS != expected_channels:
+        raise ValueError(
+            "IMAGE_IN_CHANNELS must be derived from USE_GRADIENT_NORMALS and "
+            f"USE_GEOMETRY_RASTER: got {IMAGE_IN_CHANNELS}, expected {expected_channels}."
+        )
+    if IMAGE_IN_CHANNELS not in (3, 6, 8, 11):
+        raise ValueError(f"Unsupported image channel count: {IMAGE_IN_CHANNELS}.")
+    if USE_GEOMETRY_RASTER and not USE_IMAGE_BRANCH:
+        raise ValueError("USE_GEOMETRY_RASTER requires USE_IMAGE_BRANCH=True.")
+    if USE_POINTNET_BRANCH and not USE_MESH_BRANCH:
+        raise ValueError("USE_POINTNET_BRANCH requires USE_MESH_BRANCH=True.")
+    advanced_multimodal = any(
+        (
+            USE_CROSS_VIEW_TRANSFORMER,
+            USE_DEFECT_QUERY_DECODER,
+            USE_SPATIAL_VIEW_TOKENS,
+            USE_CROSS_MODAL_ATTENTION,
+            USE_MOE,
+            USE_EARLY_EXIT,
+        )
+    )
+    if advanced_multimodal and not (USE_IMAGE_BRANCH and USE_MESH_BRANCH):
+        raise ValueError(
+            "Transformer, MoE, and early-exit architectures require both image and mesh branches."
+        )
+
+
+validate_config()

@@ -215,7 +215,7 @@ class ModelEMA:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _multilabel_mixup(
-    views: torch.Tensor,
+    views: Optional[torch.Tensor],
     labels: torch.Tensor,
     mesh_feat: Optional[torch.Tensor] = None,
     pc: Optional[torch.Tensor] = None,
@@ -229,7 +229,7 @@ def _multilabel_mixup(
     while applying multi-label union mixing with label smoothing to target labels.
 
     Args:
-        views: (B, V, 3, H, W) multi-view images
+        views: Optional (B, V, C, H, W) multi-view images
         labels: (B, C) binary multi-label targets
         mesh_feat: Optional (B, D) geometric mesh features
         pc: Optional (B, P, 3) point cloud tensors
@@ -242,16 +242,19 @@ def _multilabel_mixup(
     if alpha <= 0:
         return views, labels, mesh_feat, pc
 
-    B = views.size(0)
+    reference = views if views is not None else mesh_feat if mesh_feat is not None else pc
+    if reference is None:
+        raise ValueError("Mixup requires at least one active input modality.")
+    B = reference.size(0)
     # Sample lambda from Beta(alpha, alpha)
     lam = np.random.beta(alpha, alpha)
     lam = max(lam, 1 - lam)  # Ensure lambda >= 0.5 (primary sample dominates)
 
     # Random permutation
-    index = torch.randperm(B, device=views.device)
+    index = torch.randperm(B, device=reference.device)
 
     # Mix images
-    mixed_views = lam * views + (1 - lam) * views[index]
+    mixed_views = None if views is None else lam * views + (1 - lam) * views[index]
 
     # Mix geometry branches with the exact same lambda to prevent cross-modal mismatch
     mixed_mesh_feat = None
@@ -321,6 +324,17 @@ def _get_image_size(epoch: int) -> int:
     return current_size
 
 
+class WorkerInitFn:
+    def __init__(self, seed_base):
+        self.seed_base = seed_base
+    def __call__(self, worker_id):
+        import numpy as np
+        import random
+        worker_seed = self.seed_base + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SINGLE FOLD TRAINER
 # ═══════════════════════════════════════════════════════════════════════════
@@ -338,6 +352,7 @@ def train_one_fold(
     pc_val: np.ndarray = None,
     checkpoint_dir: str = "checkpoints",
     log_dir: str = "logs",
+    backbone: str = None,
 ) -> dict:
     """
     Train a single CV fold.
@@ -346,7 +361,20 @@ def train_one_fold(
     v2.0: Fully integrates all 5 limitation solutions.
     v2.1: Adds EMA, mixup, quality-aware thresholds, temperature scaling.
     """
-    is_moe = USE_MOE  # Cache for fast access in training loop
+    import config as _cfg
+    is_moe = bool(getattr(_cfg, "USE_MOE", False))
+    use_image_branch = bool(getattr(_cfg, "USE_IMAGE_BRANCH", True))
+    use_mesh_branch = bool(getattr(_cfg, "USE_MESH_BRANCH", True))
+    use_pointnet_branch = bool(getattr(_cfg, "USE_POINTNET_BRANCH", False))
+    if use_mesh_branch and mesh_feat_train is None:
+        raise ValueError("USE_MESH_BRANCH=True requires training mesh features.")
+    if use_mesh_branch and mesh_feat_val is None:
+        raise ValueError("USE_MESH_BRANCH=True requires validation mesh features.")
+    if use_pointnet_branch and (pc_train is None or pc_val is None):
+        raise ValueError("USE_POINTNET_BRANCH=True requires train and validation point clouds.")
+    orig_backbone = getattr(_cfg, "IMAGE_BACKBONE", None)
+    if backbone is not None:
+        _cfg.IMAGE_BACKBONE = backbone
 
     print(f"\n{'='*60}")
     print(f"  FOLD {fold + 1}/{NUM_FOLDS}")
@@ -373,7 +401,7 @@ def train_one_fold(
     # Fit scaler on training features only (H6)
     from mesh_features import StandardScaler3D
     scaler_3d = StandardScaler3D()
-    if mesh_feat_train is not None:
+    if use_mesh_branch and mesh_feat_train is not None:
         mesh_feat_train = scaler_3d.fit_transform(mesh_feat_train)
         if mesh_feat_val is not None:
             mesh_feat_val = scaler_3d.transform(mesh_feat_val)
@@ -456,7 +484,17 @@ def train_one_fold(
         augment=dataset_augment,
         aug_config=aug_config,
         views_subsample=VIEWS_TRAIN_SUBSAMPLE,
+        use_image=use_image_branch,
+        use_mesh_features=use_mesh_branch,
     )
+
+    geometry_mean = None
+    geometry_std = None
+    if getattr(_cfg, "USE_GEOMETRY_RASTER", False):
+        print("  Computing fold-local geometry raster statistics from training items...")
+        geometry_mean, geometry_std = train_dataset.compute_geometry_stats(train_ids)
+        train_dataset.geometry_mean = torch.as_tensor(geometry_mean, dtype=torch.float32)
+        train_dataset.geometry_std = torch.as_tensor(geometry_std, dtype=torch.float32)
 
     val_dataset = MeshQualityDataset(
         item_ids=val_ids,
@@ -467,6 +505,11 @@ def train_one_fold(
         image_size=IMAGE_SIZE,  # Always full size for validation
         view_grid=view_grid,
         augment=False,
+        aug_config={"use_gradient_normals": getattr(_cfg, "USE_GRADIENT_NORMALS", False)},
+        use_image=use_image_branch,
+        use_mesh_features=use_mesh_branch,
+        geometry_mean=geometry_mean,
+        geometry_std=geometry_std,
     )
 
     import config as cfg
@@ -476,15 +519,12 @@ def train_one_fold(
     # v2.0.1 FIX: worker_init_fn ensures reproducible augmentation across workers.
     # Without this, each DataLoader worker inherits a different random state,
     # making results non-reproducible when num_workers > 0.
-    def _worker_init_fn(worker_id):
-        worker_seed = SEED + fold * 1000 + worker_id
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
+    init_fn = WorkerInitFn(SEED + fold * 1000)
 
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=effective_workers, pin_memory=PIN_MEMORY, drop_last=True,
-        worker_init_fn=_worker_init_fn,
+        worker_init_fn=init_fn,
         persistent_workers=(effective_workers > 0),
         prefetch_factor=2 if effective_workers > 0 else None,
         collate_fn=safe_collate,
@@ -492,7 +532,7 @@ def train_one_fold(
     val_loader = DataLoader(
         val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
         num_workers=effective_workers, pin_memory=PIN_MEMORY,
-        worker_init_fn=_worker_init_fn,
+        worker_init_fn=init_fn,
         persistent_workers=(effective_workers > 0),
         prefetch_factor=2 if effective_workers > 0 else None,
         collate_fn=safe_collate,
@@ -500,8 +540,14 @@ def train_one_fold(
 
     # ── Build model ────────────────────────────────────────────────────────
     import config as _cfg
-    from models import build_model_from_config
+    from models import build_model_from_config, build_model_contract
     model = build_model_from_config(cfg=_cfg, effective_mesh_dim=effective_mesh_dim).to(DEVICE)
+    model_contract = build_model_contract(_cfg, effective_mesh_dim)
+    geometry_stats = (
+        {"mean": geometry_mean, "std": geometry_std}
+        if geometry_mean is not None and geometry_std is not None
+        else None
+    )
 
     # ── Loss, optimizer, scheduler ─────────────────────────────────────────
     criterion = build_loss_function(
@@ -509,6 +555,8 @@ def train_one_fold(
         class_weights=class_weights,
         label_smoothing=LABEL_SMOOTHING,
         focal_gamma=FOCAL_GAMMA,
+        per_class_gamma=getattr(_cfg, "PER_CLASS_GAMMA", False),
+        gamma_values=getattr(_cfg, "GAMMA_VALUES", None),
     ).to(DEVICE)
 
     # P2 FIX: Separate parameters to exclude 1D biases and BatchNorm/LayerNorm weights from weight decay
@@ -634,8 +682,14 @@ def train_one_fold(
         # if loader is empty (fold size < BATCH_SIZE with drop_last=True)
         batch_idx = -1
         for batch_idx, batch in enumerate(train_loader):
-            views = batch["views"].to(DEVICE)
-            if gpu_augmenter is not None:
+            train_steps_limit = getattr(_cfg, "TRAIN_STEPS_LIMIT", None)
+            if train_steps_limit is not None and batch_idx >= train_steps_limit:
+                break
+            
+            views = batch["views"]
+            if views is not None:
+                views = views.to(DEVICE)
+            if gpu_augmenter is not None and views is not None:
                 views = gpu_augmenter(views)
             labels = batch["labels"].to(DEVICE)
             mesh_feat = (
@@ -660,50 +714,59 @@ def train_one_fold(
             with safe_autocast(device_type=device_type, enabled=MIXED_PRECISION):
                 # Gradient checkpointing on image backbone (Limitation #5)
                 # Only applies to single-backbone model (MoE handles its own memory)
-                if USE_GRADIENT_CHECKPOINTING and model.training and not is_moe:
+                checkpoint_target = None
+                if (
+                    USE_GRADIENT_CHECKPOINTING
+                    and model.training
+                    and not is_moe
+                    and use_image_branch
+                ):
                     from models import AgenticEnsembleModel
                     raw_model = model.base_model if isinstance(model, AgenticEnsembleModel) else model
+                    candidate = getattr(raw_model, "image_model", raw_model)
+                    if hasattr(candidate, "_extract_view_features"):
+                        checkpoint_target = candidate
+                if checkpoint_target is not None:
                     from torch.utils.checkpoint import checkpoint
-                    original_forward = raw_model.image_model._extract_view_features
+                    original_forward = checkpoint_target._extract_view_features
                     def checkpointed_forward(view_batch):
                         return checkpoint(original_forward, view_batch, use_reentrant=False)
-                    raw_model.image_model._extract_view_features = checkpointed_forward
+                    checkpoint_target._extract_view_features = checkpointed_forward
                     try:
-                        if is_moe:
-                            logits, aux_info = model(views, mesh_feat, pc)
-                        else:
-                            logits = model(views, mesh_feat, pc)
+                        logits = _model_forward_simple(model, views, mesh_feat, pc, is_moe=False)
+                        aux_info = {}
                     finally:
-                        raw_model.image_model._extract_view_features = original_forward
+                        checkpoint_target._extract_view_features = original_forward
                 else:
                     if is_moe:
                         logits, aux_info = model(views, mesh_feat, pc)
                     else:
-                        logits = model(views, mesh_feat, pc)
+                        logits = _model_forward_simple(model, views, mesh_feat, pc, is_moe=False)
 
-                # OHEM: Compute per-sample loss, keep only top 30% hardest (Phase 3)
+                # ===== CORRECTED LOSS & OHEM / SHIELD ORDER =====
+                # 1. Base loss on full batch
+                base_loss = criterion(logits, labels)  # Standard defect loss
+
+                # 2. Clean Shield applied to the ENTIRE BATCH (protects all clean meshes)
+                shield_loss = torch.tensor(0.0, device=logits.device)
+                if getattr(_cfg, "USE_CLEAN_SHIELD", False):
+                    if not hasattr(model, 'clean_shield'):
+                        from losses import CleanMeshShieldLoss
+                        model.clean_shield = CleanMeshShieldLoss().to(DEVICE)
+                    shield_loss = model.clean_shield(logits, labels)  # Computed on full batch
+
+                # 3. Combine base + shield BEFORE OHEM
+                combined_loss_per_sample = criterion(logits, labels, reduction='none').mean(dim=1) + shield_loss
+
+                # 4. OHEM selects top 30% hardest from the COMBINED loss
                 if getattr(_cfg, "USE_OHEM", False):
-                    per_sample_loss = criterion(logits, labels, reduction='none').mean(dim=1)
-                    k = max(1, int(per_sample_loss.shape[0] * 0.3))
-                    topk_indices = per_sample_loss.topk(k, largest=True).indices
-                    
-                    ohem_loss = criterion(logits[topk_indices], labels[topk_indices])
-                    loss = ohem_loss
-                    
-                    # Add Clean Shield AFTER OHEM (Phase 1)
-                    if getattr(_cfg, "USE_CLEAN_SHIELD", False):
-                        if not hasattr(model, 'clean_shield'):
-                            from losses import CleanMeshShieldLoss
-                            model.clean_shield = CleanMeshShieldLoss().to(DEVICE)
-                        loss = loss + model.clean_shield(logits[topk_indices], labels[topk_indices])
+                    k = max(1, int(combined_loss_per_sample.shape[0] * 0.3))
+                    topk_indices = combined_loss_per_sample.topk(k, largest=True).indices
+                    final_loss = combined_loss_per_sample[topk_indices].mean()
                 else:
-                    loss = criterion(logits, labels)
-                    if getattr(_cfg, "USE_CLEAN_SHIELD", False):
-                        if not hasattr(model, 'clean_shield'):
-                            from losses import CleanMeshShieldLoss
-                            model.clean_shield = CleanMeshShieldLoss().to(DEVICE)
-                        loss = loss + model.clean_shield(logits, labels)
+                    final_loss = combined_loss_per_sample.mean()
 
+                # 5. Kimi DPO (Optional) - ensure it doesn't override
                 if getattr(_cfg, "USE_KIMI_DPO_LOSS", False):
                     from models import KimiQualityPreferenceLoss
                     if not hasattr(model, 'kimi_dpo'):
@@ -714,7 +777,9 @@ def train_one_fold(
                         clean_scores = -logits[clean_mask].mean(dim=1)
                         defective_scores = -logits[defective_mask].mean(dim=1)
                         kimi_loss = model.kimi_dpo(clean_scores.mean().unsqueeze(0), defective_scores.mean().unsqueeze(0))
-                        loss = loss + 0.1 * kimi_loss
+                        final_loss = final_loss + 0.1 * kimi_loss
+
+                loss = final_loss
 
                 # v3.0: Add load-balancing auxiliary loss for MoE
                 if is_moe and "load_balance_loss" in aux_info:
@@ -785,7 +850,7 @@ def train_one_fold(
             epoch_val_loader = DataLoader(
                 epoch_val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
                 num_workers=effective_workers, pin_memory=PIN_MEMORY,
-                worker_init_fn=_worker_init_fn,
+                worker_init_fn=init_fn,
                 persistent_workers=False,
                 prefetch_factor=2 if effective_workers > 0 else None,
                 collate_fn=safe_collate,
@@ -843,6 +908,8 @@ def train_one_fold(
                     "scaler_state_dict": scaler.state_dict(),
                     "scaler_mean": scaler_3d.mean if scaler_3d else None,
                     "scaler_std": scaler_3d.std if scaler_3d else None,
+                    "model_contract": model_contract,
+                    "geometry_stats": geometry_stats,
                     "quality_model": quality_model_payload,
                     "quality_threshold": QUALITY_MODEL_THRESHOLD,
                 }
@@ -868,6 +935,8 @@ def train_one_fold(
                 "scaler_state_dict": scaler.state_dict(),
                 "scaler_mean": scaler_3d.mean if scaler_3d else None,
                 "scaler_std": scaler_3d.std if scaler_3d else None,
+                "model_contract": model_contract,
+                "geometry_stats": geometry_stats,
                 "quality_model": quality_model_payload,
                 "quality_threshold": QUALITY_MODEL_THRESHOLD,
             }
@@ -1012,7 +1081,7 @@ def train_one_fold(
         pred_rate = float(y_pred_c.mean())
         
         print(f"      {name:15s} | Prev: {prevalence:.3f} | F1: {f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f} | AP: {ap:.4f} | PredRate: {pred_rate:.3f} | FP-Clean: {fp_on_clean}")
-    print("    " + "─" * 80 + "\n")
+    print("    " + "-" * 80 + "\n")
 
     fold_result = {
         "fold": fold,
@@ -1032,14 +1101,28 @@ def train_one_fold(
     with open(result_path, "w") as f:
         json.dump(fold_result, f, indent=2)
 
+    if orig_backbone is not None:
+        _cfg.IMAGE_BACKBONE = orig_backbone
     return fold_result
 
 
 def _model_forward_simple(model, views, mesh_feat, pc, is_moe=False):
-    """Unified forward that handles both MoE (tuple return) and single model."""
+    """Dispatch exactly the modalities enabled by the active configuration."""
+    import config as cfg
+
+    use_image = bool(getattr(cfg, "USE_IMAGE_BRANCH", True))
+    use_mesh = bool(getattr(cfg, "USE_MESH_BRANCH", True))
+    if use_image and views is None:
+        raise ValueError("Image branch is enabled but this batch has no views tensor.")
+    if use_mesh and mesh_feat is None:
+        raise ValueError("Mesh branch is enabled but this batch has no mesh_features tensor.")
     if is_moe:
         return model.forward_simple(views, mesh_feat, pc)
-    return model(views, mesh_feat, pc)
+    if use_image and use_mesh:
+        return model(views, mesh_feat, pc)
+    if use_image:
+        return model(views)
+    return model(mesh_feat)
 
 
 def validate(
@@ -1060,8 +1143,14 @@ def validate(
     device_type = "cuda" if "cuda" in device else "cpu"
 
     with torch.no_grad():
-        for batch in val_loader:
-            views = batch["views"].to(device)
+        for batch_idx, batch in enumerate(val_loader):
+            train_steps_limit = getattr(_cfg, "TRAIN_STEPS_LIMIT", None)
+            if train_steps_limit is not None and batch_idx >= train_steps_limit:
+                break
+            
+            views = batch["views"]
+            if views is not None:
+                views = views.to(device)
             labels = batch["labels"].to(device)
             mesh_feat = (
                 batch["mesh_features"].to(device)
@@ -1113,7 +1202,9 @@ def predict_proba(model, data_loader, device, is_moe=False):
 
     with torch.no_grad():
         for batch in data_loader:
-            views = batch["views"].to(device)
+            views = batch["views"]
+            if views is not None:
+                views = views.to(device)
             mesh_feat = (
                 batch["mesh_features"].to(device)
                 if batch["mesh_features"] is not None else None
@@ -1181,23 +1272,46 @@ def train_full_cv(
             
     print(f"  [Group splits] Total unique groups found: {train_df['mesh_group_id'].nunique()}")
 
-    try:
-        from sklearn.model_selection import StratifiedGroupKFold
-        gkf = StratifiedGroupKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
-        split_iter = gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values)
-        print("  [Group splits] Using StratifiedGroupKFold for leak-free, class-balanced validation.")
-    except ImportError:
-        from sklearn.model_selection import GroupKFold
-        gkf = GroupKFold(n_splits=NUM_FOLDS)
-        split_iter = gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values)
-        print("  [Group splits] Using GroupKFold for leak-free validation.")
+    import json
+    fold_assignments_path = "logs/fold_assignments.json"
+    if os.path.exists(fold_assignments_path):
+        print(f"  [Group splits] Loading pre-computed fixed folds from {fold_assignments_path}")
+        with open(fold_assignments_path, "r") as f:
+            fold_assignments = json.load(f)
+        split_list = []
+        for fold_key in sorted(fold_assignments.keys(), key=int)[:NUM_FOLDS]:
+            t_idx = np.array(fold_assignments[fold_key]["train_indices"])
+            v_idx = np.array(fold_assignments[fold_key]["val_indices"])
+            split_list.append((t_idx, v_idx))
+    else:
+        try:
+            from sklearn.model_selection import StratifiedGroupKFold
+            gkf = StratifiedGroupKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
+            split_list = list(gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values))
+            print("  [Group splits] Using StratifiedGroupKFold for leak-free, class-balanced validation.")
+        except ImportError:
+            from sklearn.model_selection import GroupKFold
+            gkf = GroupKFold(n_splits=NUM_FOLDS)
+            split_list = list(gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values))
+            print("  [Group splits] Using GroupKFold for leak-free validation.")
+
+    # Grouping validation integrity check
+    groups_array = train_df["mesh_group_id"].values
+    print("  [Group splits] Verifying group distribution across folds (no leakage)...")
+    for f_idx, (t_idx, v_idx) in enumerate(split_list):
+        train_groups = set(groups_array[t_idx])
+        val_groups = set(groups_array[v_idx])
+        overlap = train_groups.intersection(val_groups)
+        print(f"    Fold {f_idx} - Train items: {len(t_idx)} (groups: {len(train_groups)}), Val items: {len(v_idx)} (groups: {len(val_groups)}), Overlap: {len(overlap)}")
+        assert len(overlap) == 0, f"Leakage detected in Fold {f_idx}! Group overlap: {overlap}"
+    print("  [Group splits] Verification complete: 100% leak-free grouping.")
 
     item_ids = train_df["item_id"].values
     all_fold_results = []
     # Collect out-of-fold validation predictions for knowledge distillation (Grandmaster Phase 2)
     oof_predictions = np.zeros((len(train_df), len(DEFECT_COLS)))
 
-    for fold, (train_idx, val_idx) in enumerate(split_iter):
+    for fold, (train_idx, val_idx) in enumerate(split_list):
         # OVERRIDE BACKBONE FOR THIS FOLD (Heterogeneous CV - Step 1)
         import config as _cfg
         if hasattr(_cfg, "HETERO_CV_BACKBONES") and _cfg.HETERO_CV_BACKBONES:
@@ -1238,31 +1352,48 @@ def train_full_cv(
             oof_predictions[val_idx] = np.array(val_proba)
 
     # ── Aggregate results ──────────────────────────────────────────────────
+    print("\n  [OOF Calibration] Optimizing final thresholds on the complete calibrated OOF matrix...")
+    final_thresholds = optimize_thresholds_f1_final(
+        y_true_defects=train_df[DEFECT_COLS].values,
+        y_true_quality=train_df["quality"].values,
+        y_proba=oof_predictions,
+        class_names=DEFECT_COLS,
+        search_range=(0.05, 0.95),
+        steps=50,
+    )
+    
+    oof_pred = (oof_predictions >= final_thresholds).astype(int)
+    oof_pred_df = pd.DataFrame(oof_pred, columns=DEFECT_COLS)
+    oof_pred_df["quality"] = derive_quality(oof_pred)
+    true_df = train_df[DEFECT_COLS + ["quality"]].reset_index(drop=True)
+    oof_metrics = compute_f1_final(true_df, oof_pred_df)
+    
     avg_metrics = {}
     for key in ["f1_quality", "f1_defects", "f1_final"]:
         values = [r["final_metrics"][key] for r in all_fold_results]
         avg_metrics[f"{key}_mean"] = float(np.mean(values))
         avg_metrics[f"{key}_std"] = float(np.std(values))
 
-    all_thresholds = np.array([r["thresholds"] for r in all_fold_results])
-    avg_thresholds = all_thresholds.mean(axis=0)
-
     print(f"\n{'='*60}")
     print(f"  CROSS-VALIDATION RESULTS ({NUM_FOLDS} folds)")
     print(f"{'='*60}")
-    print(f"  F1_final:   {avg_metrics['f1_final_mean']:.2f} +/- {avg_metrics['f1_final_std']:.2f}")
-    print(f"  F1_quality: {avg_metrics['f1_quality_mean']:.4f} +/- {avg_metrics['f1_quality_std']:.4f}")
-    print(f"  F1_defects: {avg_metrics['f1_defects_mean']:.4f} +/- {avg_metrics['f1_defects_std']:.4f}")
-    print(f"  Avg thresholds: {dict(zip(DEFECT_COLS, avg_thresholds.round(3)))}")
+    print(f"  OOF F1_final:   {oof_metrics['f1_final']:.2f}")
+    print(f"  OOF F1_quality: {oof_metrics['f1_quality']:.4f}")
+    print(f"  OOF F1_defects: {oof_metrics['f1_defects']:.4f}")
+    print(f"  Fold F1_final:  {avg_metrics['f1_final_mean']:.2f} +/- {avg_metrics['f1_final_std']:.2f}")
+    print(f"  Final optimized thresholds: {dict(zip(DEFECT_COLS, final_thresholds.round(3)))}")
 
-    # Average temperature across folds
     avg_temperature = float(np.mean([r.get("temperature", 1.0) for r in all_fold_results]))
+    fold_checkpoint_metadata = [r.get("best_model_path") for r in all_fold_results]
 
     cv_result = {
-        "avg_metrics": avg_metrics,
-        "avg_thresholds": avg_thresholds.tolist(),
-        "avg_temperature": avg_temperature,
-        "fold_results": all_fold_results,
+        "final_thresholds": final_thresholds.tolist(),
+        "final_oof_f1_final": float(oof_metrics["f1_final"]),
+        "per_class_oof_f1": {c: float(oof_metrics.get(f"f1_{c}", 0.0)) for c in DEFECT_COLS},
+        "fold_metrics": avg_metrics,
+        "fold_temperatures": [float(r.get("temperature", 1.0)) for r in all_fold_results],
+        "fold_checkpoint_metadata": fold_checkpoint_metadata,
+        "fixed_fold_manifest_path": "logs/group_manifest.csv",
     }
 
     # Fit OOD detector on train features (Phase 8 Integration)
@@ -1291,7 +1422,7 @@ def train_full_cv(
             val_true=train_df[DEFECT_COLS].values,
             val_proba=oof_predictions,
             item_ids=train_df["item_id"].tolist(),
-            thresholds=avg_thresholds,
+            thresholds=final_thresholds,
             class_names=DEFECT_COLS,
             log_dir=log_dir
         )

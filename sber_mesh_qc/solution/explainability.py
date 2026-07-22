@@ -26,7 +26,7 @@ class OODDetector:
         X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
         self.mean = np.mean(X, axis=0)
         cov = np.cov(X, rowvar=False) + 1e-5 * np.eye(X.shape[1])
-        self.inv_cov = np.linalg.inv(cov)
+        self.inv_cov = np.linalg.pinv(cov)
         
     def compute_ood_score(self, x: np.ndarray) -> float:
         """Compute Mahalanobis distance as OOD score."""

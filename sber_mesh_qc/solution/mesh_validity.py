@@ -160,17 +160,18 @@ class MeshValidityAnalyzer:
 
     @staticmethod
     def _compute_aabb_overlaps(vertices: np.ndarray, faces: np.ndarray) -> int:
+        F = len(faces)
         tri_points = vertices[faces]
         mins = np.min(tri_points, axis=1)
         maxs = np.max(tri_points, axis=1)
 
-        if F > 2000:
+        if F > 200:
             rng = np.random.RandomState(42)
-            idx = rng.choice(F, 2000, replace=False)
+            idx = rng.choice(F, 200, replace=False)
             mins = mins[idx]
             maxs = maxs[idx]
             faces_subset = faces[idx]
-            F = 2000
+            F = 200
         else:
             faces_subset = faces
 
@@ -189,5 +190,7 @@ class MeshValidityAnalyzer:
                 if len(set(f_i).intersection(f_j)) > 0:
                     continue
                 overlap_count += 1
+                # Early stop: we only care if overlaps exist (> 0)
+                return overlap_count
                 
         return overlap_count

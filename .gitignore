@@ -2,12 +2,23 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.ipynb_checkpoints/
 
-# PyTorch / training checkpoints
+# PyTorch / training checkpoints / outputs / logs
 checkpoints/
 sber_mesh_qc/checkpoints/
-sber_mesh_qc/smoke_debug.log
-sber_mesh_qc/submission.csv
+logs/
+sber_mesh_qc/logs/
+*.log
+*.pt
+*.pth
+*.onnx
+*.safetensors
+cv_results.json
+submission*.csv
+sber_mesh_qc/submission*.csv
+solution_src.zip
 
 # Large Datasets / Renderings / Data Cache
 data/
@@ -18,9 +29,25 @@ sber_mesh_qc/train_tensors/
 sber_mesh_qc/test_tensors/
 sber_mesh_qc/solution/train_tensors/
 sber_mesh_qc/solution/test_tensors/
+*.npz
+*.npy
+*.png
+*.jpg
+*.jpeg
+*.zip
+*.parquet
 
-# OS generated files
+# Environment / IDE / OS generated files
 .DS_Store
 .DS_Store?
 ehthumbs.db
 Thumbs.db
+.gemini/
+.codex/
+.agents/
+.vscode/
+.idea/
+venv/
+.venv/
+env/
+.env

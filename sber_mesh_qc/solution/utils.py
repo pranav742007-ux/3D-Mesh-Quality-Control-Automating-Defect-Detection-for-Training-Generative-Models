@@ -260,15 +260,7 @@ def optimize_thresholds_f1_final(
         f1_q = f1_score(y_true_quality, quality_pred, average="binary", zero_division=0)
         f1_d = f1_score(y_true_defects, pred, average="weighted", zero_division=0)
         
-        base_score = 10.0 * f1_q + 10.0 * f1_d
-        
-        # QUADRATIC PENALTY: If max probability is low (model thinks it's clean),
-        # but we predicted a defect due to low threshold, PUNISH (Phase 4).
-        max_probs = y_proba.max(axis=1)
-        false_pos_on_likely_clean = (pred.sum(axis=1) > 0) & (max_probs < 0.4)
-        penalty = np.sum(false_pos_on_likely_clean) * 2.0
-        
-        return base_score - penalty
+        return 10.0 * f1_q + 10.0 * f1_d
     
     # Multiple passes for convergence (greedy coordinate descent)
     for _pass in range(3):

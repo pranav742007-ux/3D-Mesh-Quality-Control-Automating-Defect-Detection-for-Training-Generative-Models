@@ -31,12 +31,16 @@ def _is_safe_archive_member(member_name: str, dest_dir: str) -> bool:
     """Check if an archive member path is safe (no path traversal).
     
     Prevents CVE-2007-4559: malicious archives containing entries like
-    '../../etc/passwd' that write files outside the extraction directory.
+    '../../etc/passwd' or Windows UNC paths writing outside dest_dir.
     """
-    # Resolve the full path and ensure it's within dest_dir
+    # Normalize slashes and resolve canonical absolute paths
+    clean_member = os.path.normpath(member_name).lstrip('/\\')
     abs_dest = os.path.realpath(dest_dir)
-    abs_member = os.path.realpath(os.path.join(dest_dir, member_name))
-    return abs_member.startswith(abs_dest + os.sep) or abs_member == abs_dest
+    abs_member = os.path.realpath(os.path.join(dest_dir, clean_member))
+    
+    # Common prefix check with trailing slash to prevent directory prefix spoofing
+    common = os.path.commonpath([abs_dest, abs_member])
+    return common == abs_dest
 
 
 def _safe_extractall_zip(zf: zipfile.ZipFile, dest_dir: str) -> None:

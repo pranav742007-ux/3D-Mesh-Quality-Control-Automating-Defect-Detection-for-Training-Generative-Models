@@ -468,8 +468,6 @@ async def repair_mesh_endpoint(mesh_file: UploadFile = File(...)):
             vertices, faces = parse_obj_bytes(content)
 
         repaired_verts, repaired_faces, report = auto_repair_mesh(vertices, faces)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
         from fastapi.responses import StreamingResponse
 
@@ -482,22 +480,22 @@ async def repair_mesh_endpoint(mesh_file: UploadFile = File(...)):
 
         headers = {
             "Content-Disposition": f"attachment; filename=repaired_{filename.replace('.npz', '.obj')}",
-            "X-Repaired": str(report["repaired"]),
-            "X-Degenerate-Faces-Purged": str(report["degenerate_faces_purged"]),
-            "X-Boundary-Holes-Filled": str(report["boundary_holes_filled"]),
-            "X-Final-Vertex-Count": str(report["final_vertex_count"]),
-            "X-Final-Face-Count": str(report["final_face_count"]),
+            "X-Repaired": str(report.get("repaired", False)),
+            "X-Degenerate-Faces-Purged": str(report.get("degenerate_faces_purged", 0)),
+            "X-Boundary-Holes-Filled": str(report.get("boundary_holes_filled", 0)),
+            "X-Final-Vertex-Count": str(report.get("final_vertex_count", len(repaired_verts))),
+            "X-Final-Face-Count": str(report.get("final_face_count", len(repaired_faces))),
         }
-        return StreamingResponse(obj_generator(), media_type="model/obj", headers=headers)
-
     except ValueError as ve:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
         raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 # =============================================================================

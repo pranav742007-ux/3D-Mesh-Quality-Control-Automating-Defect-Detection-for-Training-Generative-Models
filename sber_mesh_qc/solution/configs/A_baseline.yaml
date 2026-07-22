@@ -1,0 +1,9 @@
+# A: RGB + Mesh (baseline, 3-ch)
+USE_IMAGE_BRANCH: true
+USE_MESH_BRANCH: true
+USE_GEOMETRY_RASTER: false
+USE_GRADIENT_NORMALS: false
+NUM_FOLDS: 5
+NUM_EPOCHS: 25
+BATCH_SIZE: 16
+FUSION_METHOD: "late_average"

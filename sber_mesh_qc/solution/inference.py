@@ -123,10 +123,9 @@ def inference_with_tta(
                         except TypeError:
                             logits = model.forward_simple(tta_views, mesh_feat, pc)
                     else:
-                        try:
-                            logits = model(tta_views, mesh_feat, pc, effort=effort)
-                        except TypeError:
-                            logits = model(tta_views, mesh_feat, pc)
+                        import config as cfg
+                        from models import forward_model
+                        logits = forward_model(model, tta_views, mesh_feat, pc, cfg)
                     if temperature != 1.0:
                         logits = logits / temperature
                 batch_logits.append(logits)
@@ -211,6 +210,14 @@ def ensemble_inference(
         thresholds = np.full(len(DEFECT_COLS), 0.5)
         print("Using default threshold 0.5 for all classes")
 
+    # ---- Threshold overrides (optional) ----
+    if getattr(config, "OVERRIDE_THRESHOLDS", False) and getattr(config, "MANUAL_THRESHOLD_OVERRIDES", None) is not None:
+        for class_name, val in config.MANUAL_THRESHOLD_OVERRIDES.items():
+            if class_name in DEFECT_COLS:
+                idx = DEFECT_COLS.index(class_name)
+                thresholds[idx] = val
+        print(f"Applied threshold overrides: {dict(zip(DEFECT_COLS, thresholds.round(3)))}")
+
     if getattr(config, "USE_SEPARATE_QUALITY_MODEL", False):
         thresholds = apply_abstract_threshold_cap(
             thresholds,
@@ -287,6 +294,10 @@ def ensemble_inference(
         )
 
         input_mesh_dim = fold_mesh_features.shape[1] if fold_mesh_features is not None and hasattr(fold_mesh_features, "shape") and len(fold_mesh_features.shape) > 1 else None
+        
+        from models import validate_checkpoint_contract
+        validate_checkpoint_contract(ckpt, cfg, input_mesh_dim or MESH_FEATURE_DIM, strict=strict_loading)
+        
         model = build_model_for_inference(fold, input_mesh_dim=input_mesh_dim).to(DEVICE)
 
         state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
@@ -335,6 +346,42 @@ def ensemble_inference(
     print(f"\n  Ensemble of {len(fold_proba_list)} folds")
     print(f"  Prediction shape: {ensemble_proba.shape}")
 
+    # ---- Geometry prior for intersection ----
+    if getattr(config, "ENABLE_INTERSECTION_INFERENCE_GEOPRIOR", False):
+        from mesh_validity import MeshValidityAnalyzer
+        intersection_idx = config.DEFECT_COLS.index('intersection')
+        print(f"  [Geometry Prior] Running self-intersection validation on test meshes...")
+        for i, item_id in enumerate(test_ids):
+            npz_path = os.path.join(test_image_dir, f"{item_id}.npz")
+            try:
+                data = np.load(npz_path, allow_pickle=False)
+                has_intersect = MeshValidityAnalyzer._compute_aabb_overlaps(data['vertices'], data['faces']) > 0
+                if has_intersect:
+                    raw_prob = ensemble_proba[i, intersection_idx]
+                    if raw_prob > 0.2:  # Only boost if model already suspects it
+                        boosted = raw_prob + (0.35 * (1 - raw_prob))  # Gentle nudge
+                        ensemble_proba[i, intersection_idx] = min(boosted, 0.88)  # Cap at 0.88
+            except Exception:
+                pass  # if file missing or corrupt, skip
+
+    # ---- Geometry priors for lowpoly and scale ----
+    if mesh_features is not None:
+        lowpoly_idx = config.DEFECT_COLS.index("lowpoly")
+        scale_idx = config.DEFECT_COLS.index("scale")
+        for i in range(len(ensemble_proba)):
+            num_faces = mesh_features[i, 1]
+            bbox_diag = mesh_features[i, 9]
+            
+            # num_faces < 300 -> boost lowpoly probability to at least 0.55
+            if num_faces < 300:
+                raw_lowpoly = ensemble_proba[i, lowpoly_idx]
+                ensemble_proba[i, lowpoly_idx] = max(raw_lowpoly, 0.55)
+                
+            # bbox_diag < 0.15 or > 1.8 -> boost scale probability to at least 0.60
+            if bbox_diag < 0.15 or bbox_diag > 1.8:
+                raw_scale = ensemble_proba[i, scale_idx]
+                ensemble_proba[i, scale_idx] = max(raw_scale, 0.60)
+
     # ── GEOMETRIC SAFETY NET (Grandmaster Phase 1) ────────────────────────
     # Use unsupervised geometry to prevent False Positives on clean meshes.
     # If the model isn't confident about any defect (max prob < 0.35), it is likely clean.
@@ -350,13 +397,19 @@ def ensemble_inference(
     # ── Apply thresholds ───────────────────────────────────────────────────
     predictions = (ensemble_proba >= thresholds).astype(int)
 
+    # Clean-Mesh Confidence Gate: if max defect probability < 0.3, force clean
+    max_probs = ensemble_proba.max(axis=1)
+    clean_candidates = max_probs < 0.30
+    predictions[clean_candidates] = 0
+
     # ── Derive quality ─────────────────────────────────────────────────────
     quality_proba = None
     if fold_quality_proba_list:
         quality_proba = np.mean(fold_quality_proba_list, axis=0)
         quality_threshold = float(getattr(config, "QUALITY_MODEL_THRESHOLD", 0.5))
         quality = (quality_proba >= quality_threshold).astype(int)
-        print(f"  Quality predicted by {len(fold_quality_proba_list)} fold mesh classifiers")
+        quality[clean_candidates] = 1
+        print(f"  Quality predicted by {len(fold_quality_proba_list)} fold mesh classifiers (with Clean-Mesh Gate)")
     else:
         quality = derive_quality(predictions)
         print("  [WARNING] No saved quality classifier found; using derived quality fallback")

@@ -491,8 +491,13 @@ def train_one_fold(
     geometry_mean = None
     geometry_std = None
     if getattr(_cfg, "USE_GEOMETRY_RASTER", False):
-        print("  Computing fold-local geometry raster statistics from training items...")
-        geometry_mean, geometry_std = train_dataset.compute_geometry_stats(train_ids)
+        print("  Computing fold-local geometry raster statistics at validation/inference resolution...")
+        stats_image_size = train_dataset.image_size
+        train_dataset.image_size = IMAGE_SIZE
+        try:
+            geometry_mean, geometry_std = train_dataset.compute_geometry_stats(train_ids)
+        finally:
+            train_dataset.image_size = stats_image_size
         train_dataset.geometry_mean = torch.as_tensor(geometry_mean, dtype=torch.float32)
         train_dataset.geometry_std = torch.as_tensor(geometry_std, dtype=torch.float32)
 
@@ -986,18 +991,18 @@ def train_one_fold(
         print("  Using defect-only threshold optimization; quality is predicted independently.")
         thresholds = optimize_thresholds(
             val_true, val_proba, DEFECT_COLS,
-            search_range=(0.05, 0.95), steps=50,
+            search_range=(0.05, 0.95), steps=200,
         )
     elif OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
         print("  Using quality-aware threshold optimization (f1_final metric)...")
         thresholds = optimize_thresholds_f1_final(
             val_true, val_true_quality, val_proba, DEFECT_COLS,
-            search_range=(0.05, 0.95), steps=50,
+            search_range=(0.05, 0.95), steps=200,
         )
     elif OPTIMIZE_THRESHOLDS:
         thresholds = optimize_thresholds(
             val_true, val_proba, DEFECT_COLS,
-            search_range=(0.05, 0.95), steps=50,
+            search_range=(0.05, 0.95), steps=200,
         )
     else:
         thresholds = np.full(len(DEFECT_COLS), 0.5)
@@ -1025,16 +1030,27 @@ def train_one_fold(
             if OPTIMIZE_THRESHOLDS and USE_SEPARATE_QUALITY_MODEL and quality_model_payload is not None:
                 thresholds = optimize_thresholds(
                     val_true, val_proba, DEFECT_COLS,
-                    search_range=(0.05, 0.95), steps=50,
+                    search_range=(0.05, 0.95), steps=200,
                 )
                 thresholds = apply_abstract_threshold_cap(thresholds, ABSTRACT_THRESHOLD_MAX)
             elif OPTIMIZE_THRESHOLDS and OPTIMIZE_THRESHOLDS_F1_FINAL:
                 thresholds = optimize_thresholds_f1_final(
                     val_true, val_true_quality, val_proba, DEFECT_COLS,
-                    search_range=(0.05, 0.95), steps=50,
+                    search_range=(0.05, 0.95), steps=200,
                 )
         except Exception as e:
             print(f"  [WARNING] Temperature scaling failed: {e} — using T=1.0")
+
+    # The selected checkpoint is saved before validation calibration.  Persist
+    # the fold-specific calibration afterwards so inference can apply each
+    # model's own temperature before ensemble averaging.
+    if os.path.isfile(best_path):
+        calibrated_checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
+        if isinstance(calibrated_checkpoint, dict):
+            calibrated_checkpoint["temperature"] = float(temperature)
+            calibrated_checkpoint["fold_thresholds"] = thresholds.tolist()
+            calibrated_checkpoint["calibration_schema_version"] = 1
+            torch.save(calibrated_checkpoint, best_path)
 
     val_pred = (val_proba >= thresholds).astype(int)
     val_pred_df = pd.DataFrame(val_pred, columns=DEFECT_COLS)
@@ -1272,18 +1288,59 @@ def train_full_cv(
             
     print(f"  [Group splits] Total unique groups found: {train_df['mesh_group_id'].nunique()}")
 
+    import hashlib
     import json
-    fold_assignments_path = "logs/fold_assignments.json"
+    fingerprint_rows = [
+        f"{item_id}|{group_id}|{quality}"
+        for item_id, group_id, quality in zip(
+            train_df["item_id"].astype(str),
+            train_df["mesh_group_id"].astype(str),
+            train_df["quality"].astype(int),
+        )
+    ]
+    dataset_fingerprint = hashlib.sha256("\n".join(fingerprint_rows).encode("utf-8")).hexdigest()
+    fold_assignments_path = os.path.join(log_dir, "fold_assignments.json")
+    split_list = None
     if os.path.exists(fold_assignments_path):
-        print(f"  [Group splits] Loading pre-computed fixed folds from {fold_assignments_path}")
-        with open(fold_assignments_path, "r") as f:
-            fold_assignments = json.load(f)
-        split_list = []
-        for fold_key in sorted(fold_assignments.keys(), key=int)[:NUM_FOLDS]:
-            t_idx = np.array(fold_assignments[fold_key]["train_indices"])
-            v_idx = np.array(fold_assignments[fold_key]["val_indices"])
-            split_list.append((t_idx, v_idx))
-    else:
+        try:
+            with open(fold_assignments_path, "r", encoding="utf-8") as f:
+                fold_manifest = json.load(f)
+            valid_manifest = (
+                isinstance(fold_manifest, dict)
+                and fold_manifest.get("schema_version") == 1
+                and fold_manifest.get("dataset_fingerprint") == dataset_fingerprint
+                and fold_manifest.get("n_rows") == len(train_df)
+                and fold_manifest.get("num_folds") == NUM_FOLDS
+                and isinstance(fold_manifest.get("folds"), dict)
+            )
+            if not valid_manifest:
+                raise ValueError("manifest schema, dataset fingerprint, or fold count does not match")
+            split_list = []
+            for fold in range(NUM_FOLDS):
+                record = fold_manifest["folds"].get(str(fold))
+                if not isinstance(record, dict):
+                    raise ValueError(f"missing fold {fold}")
+                train_indices = np.asarray(record.get("train_indices"), dtype=np.int64)
+                val_indices = np.asarray(record.get("val_indices"), dtype=np.int64)
+                if (
+                    train_indices.ndim != 1
+                    or val_indices.ndim != 1
+                    or len(train_indices) == 0
+                    or len(val_indices) == 0
+                    or np.any(train_indices < 0)
+                    or np.any(val_indices < 0)
+                    or np.any(train_indices >= len(train_df))
+                    or np.any(val_indices >= len(train_df))
+                    or np.intersect1d(train_indices, val_indices).size != 0
+                ):
+                    raise ValueError(f"invalid train/validation indices in fold {fold}")
+                split_list.append((train_indices, val_indices))
+            print(f"  [Group splits] Reusing verified fixed folds from {fold_assignments_path}")
+        except Exception as exc:
+            print(f"  [Group splits] Ignoring stale/invalid fold manifest: {exc}")
+            split_list = None
+
+    if split_list is None:
         try:
             from sklearn.model_selection import StratifiedGroupKFold
             gkf = StratifiedGroupKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
@@ -1295,21 +1352,49 @@ def train_full_cv(
             split_list = list(gkf.split(train_df["item_id"].values, train_df["quality"].values, groups=train_df["mesh_group_id"].values))
             print("  [Group splits] Using GroupKFold for leak-free validation.")
 
+        fold_manifest = {
+            "schema_version": 1,
+            "dataset_fingerprint": dataset_fingerprint,
+            "n_rows": len(train_df),
+            "num_folds": NUM_FOLDS,
+            "seed": SEED,
+            "folds": {
+                str(fold): {
+                    "train_indices": train_indices.tolist(),
+                    "val_indices": val_indices.tolist(),
+                }
+                for fold, (train_indices, val_indices) in enumerate(split_list)
+            },
+        }
+        with open(fold_assignments_path, "w", encoding="utf-8") as f:
+            json.dump(fold_manifest, f, indent=2)
+        print(f"  [Group splits] Saved fixed fold manifest to {fold_assignments_path}")
+
     # Grouping validation integrity check
     groups_array = train_df["mesh_group_id"].values
     print("  [Group splits] Verifying group distribution across folds (no leakage)...")
+    validation_counts = np.zeros(len(train_df), dtype=np.int64)
     for f_idx, (t_idx, v_idx) in enumerate(split_list):
         train_groups = set(groups_array[t_idx])
         val_groups = set(groups_array[v_idx])
         overlap = train_groups.intersection(val_groups)
         print(f"    Fold {f_idx} - Train items: {len(t_idx)} (groups: {len(train_groups)}), Val items: {len(v_idx)} (groups: {len(val_groups)}), Overlap: {len(overlap)}")
         assert len(overlap) == 0, f"Leakage detected in Fold {f_idx}! Group overlap: {overlap}"
+        validation_counts[v_idx] += 1
+    if not np.all(validation_counts == 1):
+        missing = int(np.sum(validation_counts == 0))
+        repeated = int(np.sum(validation_counts > 1))
+        raise RuntimeError(
+            "Invalid CV manifest: every training row must appear in exactly one "
+            f"validation fold (missing={missing}, repeated={repeated})."
+        )
     print("  [Group splits] Verification complete: 100% leak-free grouping.")
 
     item_ids = train_df["item_id"].values
     all_fold_results = []
     # Collect out-of-fold validation predictions for knowledge distillation (Grandmaster Phase 2)
-    oof_predictions = np.zeros((len(train_df), len(DEFECT_COLS)))
+    oof_predictions = np.full((len(train_df), len(DEFECT_COLS)), np.nan, dtype=np.float64)
+    oof_seen = np.zeros(len(train_df), dtype=bool)
 
     for fold, (train_idx, val_idx) in enumerate(split_list):
         # OVERRIDE BACKBONE FOR THIS FOLD (Heterogeneous CV - Step 1)
@@ -1349,7 +1434,26 @@ def train_full_cv(
         val_idx = result.get("val_idx")
         val_proba = result.get("val_proba")
         if val_idx is not None and val_proba is not None:
-            oof_predictions[val_idx] = np.array(val_proba)
+            val_idx = np.asarray(val_idx, dtype=np.int64)
+            val_proba = np.asarray(val_proba, dtype=np.float64)
+            expected_shape = (len(val_idx), len(DEFECT_COLS))
+            if val_proba.shape != expected_shape:
+                raise RuntimeError(
+                    f"Fold {fold} OOF prediction shape mismatch: got {val_proba.shape}, "
+                    f"expected {expected_shape}."
+                )
+            if np.any(oof_seen[val_idx]):
+                raise RuntimeError(f"Fold {fold} attempted to overwrite existing OOF predictions.")
+            if not np.isfinite(val_proba).all():
+                raise RuntimeError(f"Fold {fold} produced non-finite OOF probabilities.")
+            oof_predictions[val_idx] = val_proba
+            oof_seen[val_idx] = True
+
+    if not np.all(oof_seen) or not np.isfinite(oof_predictions).all():
+        raise RuntimeError(
+            "OOF calibration aborted because one or more rows have no valid "
+            "out-of-fold prediction. Do not optimize thresholds on partial OOF data."
+        )
 
     # ── Aggregate results ──────────────────────────────────────────────────
     print("\n  [OOF Calibration] Optimizing final thresholds on the complete calibrated OOF matrix...")
@@ -1359,7 +1463,7 @@ def train_full_cv(
         y_proba=oof_predictions,
         class_names=DEFECT_COLS,
         search_range=(0.05, 0.95),
-        steps=50,
+        steps=200,  # v7.3: Increased from 50 for finer per-class threshold grid
     )
     
     oof_pred = (oof_predictions >= final_thresholds).astype(int)
@@ -1388,12 +1492,20 @@ def train_full_cv(
 
     cv_result = {
         "final_thresholds": final_thresholds.tolist(),
+        # Retained for readers of older artifacts; inference always prefers
+        # final_thresholds optimized on the complete calibrated OOF matrix.
+        "avg_thresholds": final_thresholds.tolist(),
         "final_oof_f1_final": float(oof_metrics["f1_final"]),
         "per_class_oof_f1": {c: float(oof_metrics.get(f"f1_{c}", 0.0)) for c in DEFECT_COLS},
         "fold_metrics": avg_metrics,
-        "fold_temperatures": [float(r.get("temperature", 1.0)) for r in all_fold_results],
+        "avg_temperature": avg_temperature,
+        "fold_temperatures": {
+            str(r["fold"]): float(r.get("temperature", 1.0))
+            for r in all_fold_results
+        },
         "fold_checkpoint_metadata": fold_checkpoint_metadata,
-        "fixed_fold_manifest_path": "logs/group_manifest.csv",
+        "fixed_fold_manifest_path": fold_assignments_path,
+        "fold_manifest_dataset_fingerprint": dataset_fingerprint,
     }
 
     # Fit OOD detector on train features (Phase 8 Integration)

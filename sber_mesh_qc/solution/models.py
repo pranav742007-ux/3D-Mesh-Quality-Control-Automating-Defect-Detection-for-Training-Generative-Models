@@ -1686,7 +1686,11 @@ def build_model_contract(cfg, effective_mesh_dim: int) -> dict:
         "use_cross_modal_attention": bool(
             getattr(cfg, "USE_CROSS_MODAL_ATTENTION", False)
         ),
-        "mesh_feature_dim": int(effective_mesh_dim),
+        "mesh_feature_dim": (
+            int(effective_mesh_dim)
+            if bool(getattr(cfg, "USE_MESH_BRANCH", True))
+            else None
+        ),
         "num_classes": len(getattr(cfg, "DEFECT_COLS", [0] * 10)),
         "defect_cols": list(getattr(cfg, "DEFECT_COLS", [])),
         "use_gradient_normals": bool(getattr(cfg, "USE_GRADIENT_NORMALS", False)),
@@ -2490,9 +2494,23 @@ def build_model_from_config(cfg=None, effective_mesh_dim: int = 68) -> nn.Module
     return base_model
 
 
-def forward_model(model, views, mesh_features, point_cloud, cfg):
-    if getattr(cfg, "USE_IMAGE_BRANCH", True) and getattr(cfg, "USE_MESH_BRANCH", True):
+def forward_model(model, views, mesh_features=None, point_cloud=None, cfg=None):
+    """Forward a model through the modalities declared by ``cfg``.
+
+    This is deliberately shared by inference and branch-ablation smoke tests;
+    it makes a missing input a clear contract error instead of a downstream
+    ``NoneType`` or convolution failure.
+    """
+    if cfg is None:
+        import config as cfg
+    use_image = bool(getattr(cfg, "USE_IMAGE_BRANCH", True))
+    use_mesh = bool(getattr(cfg, "USE_MESH_BRANCH", True))
+    if use_image and views is None:
+        raise ValueError("Image branch is enabled but views is None.")
+    if use_mesh and mesh_features is None:
+        raise ValueError("Mesh branch is enabled but mesh_features is None.")
+    if use_image and use_mesh:
         return model(views, mesh_features, point_cloud)
-    if getattr(cfg, "USE_IMAGE_BRANCH", True):
+    if use_image:
         return model(views)
     return model(mesh_features)

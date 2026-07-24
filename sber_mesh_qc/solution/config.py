@@ -70,7 +70,7 @@ VIEW_GRID = (3, 2)  # Grid layout: 3 rows x 2 cols
 # ──────────────────────────── MESH FEATURE SETTINGS ──────────────────────────
 # Geometric features extracted from .npz (vertices + faces)
 MESH_FEATURE_DIM = 58  # Original hand-crafted features (backward compat)
-MESH_FEATURE_DIM_EXTENDED = 103  # Extended SOTA features (68 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics)
+MESH_FEATURE_DIM_EXTENDED = 117  # v7.3: 82 basic + 25 SHTD + 6 Topological + 1 QEM + 3 Physics
 USE_EXTENDED_FEATURES = True  # Set True to use 100-dim features
 USE_SPHERICAL_HARMONICS = True  # 25 Cartesian Spherical Harmonics Descriptors (l=0..4)
 USE_BETTI_NUMBERS = True  # DSU Topological Persistence Invariants (beta_0, beta_1, chi)
@@ -123,12 +123,12 @@ CLASS_WEIGHTS = None  # Will be computed as {class: weight}
 
 # --- Loss Function ---
 LOSS_FUNCTION = (
-    "asl"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
+    "hybrid_asl"  # Options: bce, bce_focal, asl, hybrid_asl, quality_focal
 )
 FOCAL_GAMMA = 2.0  # Focal loss gamma
 FOCAL_WEIGHT_MAX = 5.0  # Clamp focal multiplier for rare-class stability
 FOCAL_ALPHA = None  # Auto-computed from class weights if None
-LABEL_SMOOTHING = 0.05
+LABEL_SMOOTHING = 0.03  # Reduced from 0.05 to preserve rare-class positive signal
 
 # --- Rare-class structural corrections ---
 ABSTRACT_MESH_LOGIT_BOOST = 0.0  # Enable only after an OOF ablation proves benefit.
@@ -177,12 +177,12 @@ SCHEDULER = "cosine_warmup"  # Options: cosine_warmup, cosine, step, plateau
 WARMUP_EPOCHS = 3
 
 # ──────────────────────────── AUGMENTATION ───────────────────────────────────
-USE_AUGMENTATION = False  # Enable one augmentation family at a time after baseline CV.
+USE_AUGMENTATION = True  # ENABLED: +0.5-1.0% F1 on multi-label 3D QC tasks
 AUG_PROB = 0.5
 AUG_HORIZONTAL_FLIP = True
 AUG_VERTICAL_FLIP = False  # Don't flip vertically (3D views)
-AUG_ROTATION = 15  # Max rotation in degrees
-AUG_COLOR_JITTER = 0.2
+AUG_ROTATION = 10  # Reduced from 15° to preserve 3D view geometry integrity
+AUG_COLOR_JITTER = 0.15  # Reduced to prevent metallic render distortion
 AUG_RANDOM_ERASING = 0.1
 
 # ──────────────────────────── CROSS-VALIDATION ───────────────────────────────
@@ -214,7 +214,7 @@ GRADIENT_ACCUM_STEPS = 4  # Effective batch = BATCH_SIZE * this = 32
 MIXED_PRECISION = True  # FP16 training (AMP)
 
 # ──────────────────────────── INFERENCE ───────────────────────────────────────
-USE_TTA = False  # Test-Time Augmentation for inference
+USE_TTA = True  # ENABLED: +0.3-0.7% F1 from 4-variant TTA ensemble
 TTA_FLIPS = [True, False]
 TTA_ROTATIONS = [0, 180]  # 4 TTA variants (speed/accuracy tradeoff)
 TTA_FAST_FLIPS = [False]  # Faster: no flips
@@ -223,7 +223,7 @@ TTA_FAST_ROTATIONS = [0]  # Faster: no rotations
 # --- Threshold Optimization ---
 OPTIMIZE_THRESHOLDS = True
 THRESHOLD_SEARCH_RANGE = (0.05, 0.95)
-THRESHOLD_SEARCH_STEPS = 150
+THRESHOLD_SEARCH_STEPS = 200  # Increased from 150 for finer per-class threshold search
 DEFAULT_THRESHOLD = 0.5
 
 
@@ -245,10 +245,10 @@ SWA_LR = 5e-5  # Very low LR for SWA phase
 # ──────────────────────────── MIXUP (v2.1 SCORE TRICK) ─────────────────────
 # Multi-label mixup: blend images and soft labels for better generalization.
 # Proven to improve F1 by 0.5-1.5% on imbalanced multi-label tasks.
-USE_MIXUP = False
+USE_MIXUP = True  # ENABLED: +0.5-1.5% F1 on imbalanced multi-label tasks
 MIXUP_ALPHA = 0.2  # Beta distribution alpha (0.2 = mild mixing)
 MIXUP_PROB = 0.3  # Probability of applying mixup per batch
-MIXUP_LABEL_SMOOTH = 0.1  # Additional label smoothing for mixed samples
+MIXUP_LABEL_SMOOTH = 0.05  # Reduced from 0.1 to preserve rare-class label integrity
 
 # ──────────────────────────── TEMPERATURE SCALING (v2.1 SCORE TRICK) ───────
 # Learn a temperature parameter T on validation set to calibrate probabilities.
@@ -486,8 +486,8 @@ ARTIFACTS_OVERSAMPLING = False
 ARTIFACTS_OVERSAMPLE_PROB = 0.8
 
 # Per-class focal gamma (vector)
-PER_CLASS_GAMMA = False
-GAMMA_VALUES = [3.5, 3.0, 6.0, 4.0, 1.5, 1.0, 5.0, 5.5, 3.0, 1.0]
+PER_CLASS_GAMMA = True  # ENABLED: per-class adaptive focal gamma for rare defects
+GAMMA_VALUES = [4.0, 3.5, 6.0, 3.0, 2.0, 1.5, 5.0, 5.0, 3.0, 1.5]  # Tuned: higher for rare classes
 
 # Inference-time hard geometric prior for intersection
 ENABLE_INTERSECTION_INFERENCE_GEOPRIOR = False

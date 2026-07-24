@@ -55,12 +55,16 @@ def build_model_for_inference(fold: int, input_mesh_dim: Optional[int] = None):
     Build model architecture matching training configuration.
     v7.2: Calls unified build_model_from_config for 100% state-dict key matching.
     """
+    import config
     if input_mesh_dim is not None:
         effective_mesh_dim = input_mesh_dim
     else:
-        effective_mesh_dim = MESH_FEATURE_DIM_EXTENDED if USE_EXTENDED_FEATURES else MESH_FEATURE_DIM
+        effective_mesh_dim = (
+            getattr(config, "MESH_FEATURE_DIM_EXTENDED", MESH_FEATURE_DIM_EXTENDED)
+            if getattr(config, "USE_EXTENDED_FEATURES", USE_EXTENDED_FEATURES)
+            else getattr(config, "MESH_FEATURE_DIM", MESH_FEATURE_DIM)
+        )
 
-    import config
     # Override backbones dynamically based on fold (Heterogeneous CV - Step 1)
     if hasattr(config, "HETERO_CV_BACKBONES") and config.HETERO_CV_BACKBONES:
         config.IMAGE_BACKBONE = config.HETERO_CV_BACKBONES[fold % len(config.HETERO_CV_BACKBONES)]
@@ -94,15 +98,20 @@ def inference_with_tta(
     v2.0: Handles PointNet point clouds in batch data.
     """
     device_type = "cuda" if "cuda" in device else "cpu"
+    if not np.isfinite(temperature) or not 0.01 <= float(temperature) <= 10.0:
+        raise ValueError(f"Invalid inference temperature: {temperature}")
     model.eval()
     tta = TTATransform(flips=TTA_FLIPS, rotations=TTA_ROTATIONS) if use_tta else TTATransform(flips=[False], rotations=[0])
-    n_tta = len(tta)
+    import config as cfg
+    from models import forward_model
 
     all_proba = []
 
     with torch.no_grad():
         for batch in data_loader:
-            views = batch["views"].to(device)  # (B, V, 3, H, W)
+            views = batch["views"]
+            if views is not None:
+                views = views.to(device)  # (B, V, C, H, W)
             mesh_feat = batch["mesh_features"]
             if mesh_feat is not None:
                 mesh_feat = mesh_feat.to(device)
@@ -110,8 +119,8 @@ def inference_with_tta(
             if pc is not None:
                 pc = pc.to(device)
 
-            # Apply TTA transforms
-            tta_views_list = tta.apply(views)
+            # TTA is spatial and applies only to an active image branch.
+            tta_views_list = tta.apply(views) if views is not None else [None]
 
             is_moe_active = getattr(config, "USE_MOE", False) or hasattr(model, "forward_simple")
             batch_logits = []
@@ -123,8 +132,6 @@ def inference_with_tta(
                         except TypeError:
                             logits = model.forward_simple(tta_views, mesh_feat, pc)
                     else:
-                        import config as cfg
-                        from models import forward_model
                         logits = forward_model(model, tta_views, mesh_feat, pc, cfg)
                     if temperature != 1.0:
                         logits = logits / temperature
@@ -174,7 +181,8 @@ def ensemble_inference(
     set_seed(SEED)
 
     # ── Load thresholds and temperature ───────────────────────────────────
-    temperature = 1.0
+    default_temperature = 1.0
+    cv_fold_temperatures = {}
     if cv_results_path is not None and os.path.isfile(cv_results_path):
         try:
             with open(cv_results_path, "r") as f:
@@ -185,27 +193,43 @@ def ensemble_inference(
                 raise ValueError("CV results must be a JSON object")
             
             if thresholds is None:
-                raw_thresh = cv_results.get("avg_thresholds")
+                raw_thresh = cv_results.get("final_thresholds", cv_results.get("avg_thresholds"))
                 if not isinstance(raw_thresh, list) or len(raw_thresh) != len(DEFECT_COLS):
-                    raise ValueError(f"avg_thresholds must be a list of length {len(DEFECT_COLS)}")
+                    raise ValueError(f"final_thresholds must be a list of length {len(DEFECT_COLS)}")
                 for val in raw_thresh:
                     if not isinstance(val, (int, float)) or np.isnan(val) or np.isinf(val) or val < 0.0 or val > 1.0:
                         raise ValueError(f"Invalid threshold value: {val}")
                 thresholds = np.array(raw_thresh)
                 print(f"Loaded thresholds from CV results: {dict(zip(DEFECT_COLS, thresholds.round(3)))}")
             
-            # Validate temperature
+            # A legacy global temperature is only a fallback for checkpoints
+            # that predate per-fold calibration metadata.
             raw_temp = cv_results.get("avg_temperature", 1.0)
             if not isinstance(raw_temp, (int, float)) or np.isnan(raw_temp) or np.isinf(raw_temp) or raw_temp < 0.01 or raw_temp > 10.0:
                 raise ValueError(f"Invalid temperature value: {raw_temp}")
-            temperature = float(raw_temp)
-            if temperature != 1.0:
-                print(f"Using temperature scaling: T={temperature:.3f}")
+            default_temperature = float(raw_temp)
+
+            raw_fold_temperatures = cv_results.get("fold_temperatures", {})
+            if isinstance(raw_fold_temperatures, list):
+                raw_fold_temperatures = {
+                    str(index): value for index, value in enumerate(raw_fold_temperatures)
+                }
+            if not isinstance(raw_fold_temperatures, dict):
+                raise ValueError("fold_temperatures must be a list or dictionary")
+            for fold_key, fold_temp in raw_fold_temperatures.items():
+                if (
+                    not isinstance(fold_temp, (int, float))
+                    or not np.isfinite(fold_temp)
+                    or not 0.01 <= float(fold_temp) <= 10.0
+                ):
+                    raise ValueError(f"Invalid temperature for fold {fold_key}: {fold_temp}")
+                cv_fold_temperatures[int(fold_key)] = float(fold_temp)
         except Exception as e:
             print(f"  [WARNING] Failed to load/validate CV results: {e} — falling back to defaults")
             if thresholds is None:
                 thresholds = np.full(len(DEFECT_COLS), 0.5)
-            temperature = 1.0
+            default_temperature = 1.0
+            cv_fold_temperatures = {}
     elif thresholds is None:
         thresholds = np.full(len(DEFECT_COLS), 0.5)
         print("Using default threshold 0.5 for all classes")
@@ -262,9 +286,15 @@ def ensemble_inference(
         print(f"  Loading fold {fold} model from {checkpoint_path}")
 
         ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
-        
+        use_image_branch = bool(getattr(cfg, "USE_IMAGE_BRANCH", True))
+        use_mesh_branch = bool(getattr(cfg, "USE_MESH_BRANCH", True))
+        if use_mesh_branch and mesh_features is None:
+            raise ValueError("USE_MESH_BRANCH=True requires mesh_features at inference.")
+        if getattr(cfg, "USE_POINTNET_BRANCH", False) and point_clouds is None:
+            raise ValueError("USE_POINTNET_BRANCH=True requires point_clouds at inference.")
+
         # Scale test features dynamically for this fold using model checkpoint statistics (H6)
-        fold_mesh_features = mesh_features.copy() if mesh_features is not None else None
+        fold_mesh_features = mesh_features.copy() if use_mesh_branch and mesh_features is not None else None
         if fold_mesh_features is not None and isinstance(ckpt, dict) and "scaler_mean" in ckpt and ckpt["scaler_mean"] is not None:
             mean = ckpt["scaler_mean"]
             std = ckpt["scaler_std"]
@@ -272,18 +302,59 @@ def ensemble_inference(
             fold_mesh_features = np.where(np.isnan(fold_mesh_features) | np.isinf(fold_mesh_features), mean, fold_mesh_features)
             fold_mesh_features = (fold_mesh_features - mean) / (std + 1e-7)
 
-        # Create test_loader locally for this fold with the standardized features
+        input_mesh_dim = (
+            fold_mesh_features.shape[1]
+            if fold_mesh_features is not None
+            and hasattr(fold_mesh_features, "shape")
+            and len(fold_mesh_features.shape) > 1
+            else None
+        )
+
+        # Build before contract validation because heterogeneous folds select
+        # their own backbone in build_model_for_inference.
+        model = build_model_for_inference(fold, input_mesh_dim=input_mesh_dim).to(DEVICE)
+        from models import validate_checkpoint_contract
+        contract_mesh_dim = input_mesh_dim or getattr(cfg, "MESH_FEATURE_DIM", MESH_FEATURE_DIM)
+        validate_checkpoint_contract(ckpt, cfg, contract_mesh_dim, strict=strict_loading)
+
+        geometry_mean = None
+        geometry_std = None
+        if use_image_branch and getattr(cfg, "USE_GEOMETRY_RASTER", False):
+            geometry_stats = ckpt.get("geometry_stats") if isinstance(ckpt, dict) else None
+            if not isinstance(geometry_stats, dict):
+                raise RuntimeError(
+                    f"Fold {fold} enables geometry raster channels but checkpoint has no geometry_stats."
+                )
+            geometry_mean = geometry_stats.get("mean")
+            geometry_std = geometry_stats.get("std")
+            if (
+                not isinstance(geometry_mean, (list, tuple))
+                or not isinstance(geometry_std, (list, tuple))
+                or len(geometry_mean) != 5
+                or len(geometry_std) != 5
+                or not np.isfinite(np.asarray(geometry_mean, dtype=float)).all()
+                or not np.isfinite(np.asarray(geometry_std, dtype=float)).all()
+                or np.any(np.asarray(geometry_std, dtype=float) <= 0)
+            ):
+                raise RuntimeError(f"Fold {fold} has invalid geometry_stats metadata.")
+
+        # Create one test loader per fold because mesh standardization and
+        # geometry-channel normalization are learned from that fold's training set.
         fold_test_dataset = MeshQualityDataset(
             item_ids=test_ids,
             labels_df=None,
             image_dir=test_image_dir,
             mesh_features=fold_mesh_features,
-            point_clouds=point_clouds,
+            point_clouds=point_clouds if use_mesh_branch else None,
             image_size=IMAGE_SIZE,
             view_grid=view_grid,
             augment=False,
-            aug_config={"use_gradient_normals": USE_GRADIENT_NORMALS},
+            aug_config={"use_gradient_normals": getattr(cfg, "USE_GRADIENT_NORMALS", False)},
             views_subsample=None,
+            use_image=use_image_branch,
+            use_mesh_features=use_mesh_branch,
+            geometry_mean=geometry_mean,
+            geometry_std=geometry_std,
         )
         fold_test_loader = DataLoader(
             fold_test_dataset, batch_size=BATCH_SIZE, shuffle=False,
@@ -292,13 +363,6 @@ def ensemble_inference(
             prefetch_factor=2 if num_workers > 0 else None,
             collate_fn=safe_collate,
         )
-
-        input_mesh_dim = fold_mesh_features.shape[1] if fold_mesh_features is not None and hasattr(fold_mesh_features, "shape") and len(fold_mesh_features.shape) > 1 else None
-        
-        from models import validate_checkpoint_contract
-        validate_checkpoint_contract(ckpt, cfg, input_mesh_dim or MESH_FEATURE_DIM, strict=strict_loading)
-        
-        model = build_model_for_inference(fold, input_mesh_dim=input_mesh_dim).to(DEVICE)
 
         state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
         state_dict = clean_state_dict_keys(state_dict, model)
@@ -316,7 +380,29 @@ def ensemble_inference(
             if unexpected:
                 print(f"    [WARNING] Unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
-        fold_proba = inference_with_tta(model, fold_test_loader, DEVICE, USE_TTA, temperature=temperature, effort=effort)
+        checkpoint_temperature = ckpt.get("temperature") if isinstance(ckpt, dict) else None
+        fold_temperature = (
+            checkpoint_temperature
+            if checkpoint_temperature is not None
+            else cv_fold_temperatures.get(fold, default_temperature)
+        )
+        if (
+            not isinstance(fold_temperature, (int, float))
+            or not np.isfinite(fold_temperature)
+            or not 0.01 <= float(fold_temperature) <= 10.0
+        ):
+            raise RuntimeError(f"Fold {fold} has invalid calibration temperature: {fold_temperature}")
+        fold_temperature = float(fold_temperature)
+        if fold_temperature != 1.0:
+            print(f"    Applying fold-specific temperature: T={fold_temperature:.3f}")
+        fold_proba = inference_with_tta(
+            model,
+            fold_test_loader,
+            DEVICE,
+            USE_TTA,
+            temperature=fold_temperature,
+            effort=effort,
+        )
         fold_proba_list.append(fold_proba)
 
         quality_model = ckpt.get("quality_model") if isinstance(ckpt, dict) else None
@@ -365,7 +451,9 @@ def ensemble_inference(
                 pass  # if file missing or corrupt, skip
 
     # ---- Geometry priors for lowpoly and scale ----
-    if mesh_features is not None:
+    # These are post-model rules, so they stay opt-in until an OOF ablation
+    # proves they improve the same calibrated decision rule used in submission.
+    if mesh_features is not None and getattr(config, "ENABLE_HEURISTIC_GEOMETRY_PRIORS", False):
         lowpoly_idx = config.DEFECT_COLS.index("lowpoly")
         scale_idx = config.DEFECT_COLS.index("scale")
         for i in range(len(ensemble_proba)):
@@ -397,10 +485,16 @@ def ensemble_inference(
     # ── Apply thresholds ───────────────────────────────────────────────────
     predictions = (ensemble_proba >= thresholds).astype(int)
 
-    # Clean-Mesh Confidence Gate: if max defect probability < 0.3, force clean
-    max_probs = ensemble_proba.max(axis=1)
-    clean_candidates = max_probs < 0.30
-    predictions[clean_candidates] = 0
+    # Clean-Mesh Confidence Gate is an optional post-processing rule.  The
+    # baseline derives quality strictly from calibrated thresholded defects.
+    if getattr(config, "USE_CLEAN_MESH_CONFIDENCE_GATE", False):
+        max_probs = ensemble_proba.max(axis=1)
+        clean_candidates = max_probs < float(
+            getattr(config, "CLEAN_MESH_CONFIDENCE_MAX_PROBA", 0.30)
+        )
+        predictions[clean_candidates] = 0
+    else:
+        clean_candidates = np.zeros(len(predictions), dtype=bool)
 
     # ── Derive quality ─────────────────────────────────────────────────────
     quality_proba = None
